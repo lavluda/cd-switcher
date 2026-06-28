@@ -1,0 +1,93 @@
+name: Release
+
+# Builds native binaries for each OS and attaches them to the GitHub release.
+#
+# CD-Switcher uses Fyne (OpenGL + cgo), so every binary must be built ON its
+# target OS with a C toolchain — there is no cross-compile path between OSes. We
+# build on a matrix of native runners and upload each artifact to the release for
+# the tag that triggered the run.
+#
+# macOS is built as a single universal (arm64 + amd64) binary on the arm64
+# runner: clang ships a universal SDK, so we compile each arch with `-arch` cgo
+# flags and `lipo` them together. This avoids depending on the scarce, slow
+# macos-13 (Intel) runners entirely while still covering Intel Macs.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow attaching binaries to an existing tag/release (e.g. v0.1.0) manually.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-universal
+            runner: macos-14
+            ext: ""
+          - name: linux-amd64
+            runner: ubuntu-latest
+            goarch: amd64
+            ext: ""
+          - name: windows-amd64
+            runner: windows-latest
+            goarch: amd64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Fyne needs OpenGL + X11 development headers to build on Linux; the tray
+      # uses libayatana-appindicator.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc pkg-config \
+            libgl1-mesa-dev xorg-dev libxkbcommon-dev \
+            libayatana-appindicator3-dev
+
+      # macOS: build each arch with clang cross-arch cgo flags, then lipo into a
+      # single universal binary that runs on both Apple Silicon and Intel.
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w" -o cd-switcher-arm64 .
+          CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o cd-switcher-amd64 .
+          lipo -create -output "cd-switcher-${{ matrix.name }}" cd-switcher-arm64 cd-switcher-amd64
+          lipo -info "cd-switcher-${{ matrix.name }}"
+
+      - name: Build
+        if: runner.os != 'macOS'
+        env:
+          CGO_ENABLED: "1"
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags "-s -w" -o "cd-switcher-${{ matrix.name }}${{ matrix.ext }}" .
+
+      - name: Attach binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: cd-switcher-${{ matrix.name }}${{ matrix.ext }}
+          fail_on_unmatched_files: true

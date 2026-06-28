@@ -1,0 +1,15 @@
+# Build output
+/bin/
+*.exe
+
+# macOS
+.DS_Store
+
+# JetBrains IDE
+.idea/
+
+# Claude Code local settings (machine-specific permissions)
+.claude/settings.local.json
+
+# Internal roadmap / planning notes (kept local, not published)
+/docs/settings-and-stats-plan.md
