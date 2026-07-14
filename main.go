@@ -22,6 +22,8 @@ import (
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/ncruces/zenity"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/lavluda/cd-switcher/internal/profile"
 	"github.com/lavluda/cd-switcher/internal/secret"
 	"github.com/lavluda/cd-switcher/internal/switcher"
+	"github.com/lavluda/cd-switcher/internal/uitheme"
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
 
@@ -77,6 +80,9 @@ type statEntry struct {
 
 func main() {
 	a.fyneApp = fyneapp.New()
+	// Restyles the Settings window only — the system tray menu and zenity
+	// dialogs are native OS chrome and don't go through Fyne's theme.
+	a.fyneApp.Settings().SetTheme(uitheme.New())
 
 	desk, ok := a.fyneApp.(desktop.App)
 	if !ok {
@@ -204,7 +210,7 @@ func (a *app) refresh() {
 func (a *app) openSettings() {
 	if a.settingsWin == nil {
 		w := a.fyneApp.NewWindow("CD-Switcher Settings")
-		w.Resize(fyne.NewSize(460, 360))
+		w.Resize(fyne.NewSize(600, 620))
 		// Closing the window must not quit the app (the tray lives on).
 		w.SetCloseIntercept(w.Hide)
 		a.settingsWin = w
@@ -280,7 +286,19 @@ func (a *app) refreshOneStat(id string) {
 		a.setStatEntry(id, statEntry{err: err})
 		return
 	}
-	a.setStatEntry(id, statEntry{stats: stats, fetchedAt: time.Now()})
+	now := time.Now()
+	a.setStatEntry(id, statEntry{stats: stats, fetchedAt: now})
+
+	sample := usage.Sample{Time: now, FiveHour: stats.FiveHour.Utilization, SevenDay: stats.SevenDay.Utilization}
+	if err := usage.AppendHistory(a.historyPath(id), sample); err != nil {
+		logf("stats: append history failed for %q: %v", id, err)
+	}
+}
+
+// historyPath is where a profile's usage-percentage history is persisted,
+// so the Settings-window chart survives app restarts.
+func (a *app) historyPath(id string) string {
+	return filepath.Join(a.store.ProfileDir(id), "usage_history.json")
 }
 
 func (a *app) setStatEntry(id string, next statEntry) {
@@ -323,38 +341,117 @@ func (a *app) settingsContent() fyne.CanvasObject {
 	activeID := a.cfg.ActiveProfile
 	a.mu.Unlock()
 
-	header := widget.NewLabelWithStyle("Accounts", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	rows := container.NewVBox(header)
+	title := widget.NewLabelWithStyle("Accounts", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() { go a.refreshStats() })
+	refreshBtn.Importance = widget.LowImportance
+	header := container.NewBorder(nil, nil, title, refreshBtn)
 
+	cards := container.NewVBox()
 	if len(profiles) == 0 {
-		rows.Add(widget.NewLabel("No accounts yet — use “Add account…” from the menu."))
+		cards.Add(widget.NewLabel("No accounts yet — use “Add account…” from the menu."))
 	}
 	for _, p := range profiles {
-		id := p.ID
-		name := p.Label
-		if activeID == id {
-			name = "● " + name + "   (active)"
-		}
-		renameBtn := widget.NewButton("Rename", func() {
-			a.runOp(func() error { return a.doRename(id) })
-		})
-		removeBtn := widget.NewButton("Remove", func() {
-			a.runOp(func() error { return a.doRemove(id) })
-		})
-		actions := container.NewHBox(renameBtn, removeBtn)
-
-		statLabel := widget.NewLabel(a.statLineFor(id))
-		statLabel.Importance = widget.LowImportance
-
-		rows.Add(container.NewVBox(
-			container.NewBorder(nil, nil, widget.NewLabel(name), actions),
-			statLabel,
-		))
+		cards.Add(a.accountCard(p, p.ID == activeID))
 	}
 
-	note := widget.NewLabel("Usage stats are best-effort; only the active account's credential is guaranteed fresh.")
+	note := widget.NewLabelWithStyle(
+		"Usage stats are best-effort; only the active account's credential is guaranteed fresh.",
+		fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
 	note.Importance = widget.LowImportance
-	return container.NewBorder(nil, note, nil, nil, container.NewVScroll(rows))
+
+	return container.NewBorder(
+		container.NewVBox(header, widget.NewSeparator()),
+		note, nil, nil,
+		container.NewVScroll(cards),
+	)
+}
+
+// accountCard renders one profile as a Fyne Card: name/active badge as the
+// title, a usage progress bar + 5-hour/7-day summary as content, and
+// switch/rename/remove as icon actions.
+func (a *app) accountCard(p profile.Profile, active bool) fyne.CanvasObject {
+	id := p.ID
+	subtitle := ""
+	if active {
+		subtitle = "Active"
+	}
+
+	bar := widget.NewProgressBar()
+	fiveHr := widget.NewLabel("Usage: —")
+	fiveHr.Importance = widget.LowImportance
+	sevenDay := widget.NewLabel("")
+	sevenDay.Importance = widget.LowImportance
+	extra := widget.NewLabel("")
+	extra.Importance = widget.LowImportance
+	extra.Hide()
+
+	a.statsMu.Lock()
+	e, ok := a.statsCache[id]
+	a.statsMu.Unlock()
+	switch {
+	case ok && !e.fetchedAt.IsZero():
+		fh := e.stats.FiveHour
+		bar.SetValue(fh.Utilization / 100)
+		stale := ""
+		if e.err != nil {
+			stale = "  (stale)"
+		}
+		fiveHr.SetText(fmt.Sprintf("%.0f%% of 5-hr limit · resets %s%s",
+			fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"), stale))
+		sd := e.stats.SevenDay
+		sevenDay.SetText(fmt.Sprintf("7-day: %.0f%% · resets %s",
+			sd.Utilization, sd.ResetsAt.Local().Format("Jan 2")))
+		if eu := e.stats.ExtraUsage; eu.MonthlyLimit > 0 {
+			// used_credits/monthly_limit come back in minor currency units
+			// (e.g. pence, cents) — divide by 100 for a major-unit amount.
+			extra.SetText(fmt.Sprintf("Extra usage: %.2f / %.2f %s (%.0f%%)",
+				eu.UsedCredits/100, eu.MonthlyLimit/100, eu.Currency, eu.Utilization))
+			extra.Show()
+		}
+	default:
+		bar.Hide()
+	}
+
+	history, err := usage.LoadHistory(a.historyPath(id))
+	if err != nil {
+		logf("stats: load history failed for %q: %v", id, err)
+	}
+	chart := newSparkline(history)
+
+	var chartLabels fyne.CanvasObject = layout.NewSpacer()
+	if len(history) >= 2 {
+		oldest := widget.NewLabel(history[0].Time.Local().Format("3:04pm"))
+		oldest.Importance = widget.LowImportance
+		newest := widget.NewLabel("now")
+		newest.Importance = widget.LowImportance
+		chartLabels = container.NewBorder(nil, nil, oldest, newest)
+	}
+
+	switchBtn := widget.NewButtonWithIcon("Switch", theme.MediaPlayIcon(), func() {
+		a.runOp(func() error { return a.doSwitch(id) })
+	})
+	if active {
+		switchBtn.Disable()
+	} else {
+		switchBtn.Importance = widget.HighImportance
+	}
+	renameBtn := widget.NewButtonWithIcon("", theme.DocumentCreateIcon(), func() {
+		a.runOp(func() error { return a.doRename(id) })
+	})
+	renameBtn.Importance = widget.LowImportance
+	removeBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+		a.runOp(func() error { return a.doRemove(id) })
+	})
+	removeBtn.Importance = widget.LowImportance
+
+	// Actions sit in their own footer row (natural height) rather than beside
+	// the body in a Border — Border stretches its side slots to match the
+	// body's full height, and HBox in turn stretches each child to fill that
+	// height, which blew the Switch button up to the height of the whole card.
+	actions := container.NewHBox(layout.NewSpacer(), switchBtn, renameBtn, removeBtn)
+
+	body := container.NewVBox(bar, fiveHr, sevenDay, extra, chart, chartLabels, widget.NewSeparator(), actions)
+	return widget.NewCard(p.Label, subtitle, body)
 }
 
 // runOp hands an account operation to the worker and returns immediately so the

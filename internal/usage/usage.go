@@ -31,6 +31,8 @@ type Window struct {
 }
 
 // ExtraUsage describes pay-as-you-go usage beyond the plan's included limits.
+// MonthlyLimit/UsedCredits are in minor currency units (e.g. pence, cents) —
+// divide by 100 for a major-unit ($/£/€) amount.
 type ExtraUsage struct {
 	MonthlyLimit float64 `json:"monthly_limit"`
 	UsedCredits  float64 `json:"used_credits"`
