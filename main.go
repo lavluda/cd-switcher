@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -27,7 +28,9 @@ import (
 	"github.com/lavluda/cd-switcher/internal/claude"
 	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/profile"
+	"github.com/lavluda/cd-switcher/internal/secret"
 	"github.com/lavluda/cd-switcher/internal/switcher"
+	"github.com/lavluda/cd-switcher/internal/usage"
 )
 
 type app struct {
@@ -51,9 +54,26 @@ type app struct {
 
 	normalIcon fyne.Resource
 	spin       []fyne.Resource // spinner animation frames
+
+	usageClient *usage.Client
+
+	// statsMu guards statsCache. It is deliberately separate from mu: usage
+	// fetches make network calls and must never be held up by (or hold up)
+	// the file-mutation lock.
+	statsMu    sync.Mutex
+	statsCache map[string]statEntry
 }
 
 var a = &app{}
+
+// statEntry is one profile's last-known usage stats. A failed refresh only
+// overwrites err, so the UI can keep showing a stale-but-real value instead
+// of blanking out.
+type statEntry struct {
+	stats     usage.Stats
+	fetchedAt time.Time // zero => never succeeded => render "—"
+	err       error     // last attempt's outcome; nil if it succeeded
+}
 
 func main() {
 	a.fyneApp = fyneapp.New()
@@ -98,8 +118,11 @@ func (a *app) setup() {
 		notifyErr("Claude Desktop not found", err)
 	}
 
+	a.usageClient = usage.NewClient()
+
 	a.buildAndSetMenu()
 	go a.firstRunIfNeeded()
+	go a.startStatsLoop()
 }
 
 // buildAndSetMenu rebuilds the tray menu from current state and installs it.
@@ -136,7 +159,11 @@ func (a *app) buildAndSetMenu() {
 			a.runOp(func() error { return a.doSwitch(id) })
 		})
 		it.Checked = hasActive && id == active.ID
-		items = append(items, it)
+
+		statLine := fyne.NewMenuItem(a.statLineFor(id), nil)
+		statLine.Disabled = true
+
+		items = append(items, it, statLine)
 	}
 	items = append(items, fyne.NewMenuItemSeparator())
 
@@ -185,6 +212,107 @@ func (a *app) openSettings() {
 	a.settingsWin.SetContent(a.settingsContent())
 	a.settingsWin.Show()
 	a.settingsWin.RequestFocus()
+	go a.refreshStats()
+}
+
+// statsInterval is the background usage-stats poll cadence. The endpoint is
+// undocumented, so this is kept infrequent.
+const statsInterval = 5 * time.Minute
+
+// statsMinAge skips refetching a profile whose cached stats are still this
+// fresh, so opening Settings repeatedly doesn't spam the endpoint.
+const statsMinAge = 60 * time.Second
+
+// startStatsLoop fetches usage stats once immediately, then on a timer, for
+// as long as the app runs. It never touches a.ops/opWorker (reserved for
+// file-mutating account operations) and never blocks the UI thread.
+func (a *app) startStatsLoop() {
+	a.refreshStats()
+	for range time.Tick(statsInterval) {
+		a.refreshStats()
+	}
+}
+
+// refreshStats fetches usage stats for every profile not refreshed within
+// statsMinAge, concurrently, then repaints the menu/settings window once.
+func (a *app) refreshStats() {
+	a.mu.Lock()
+	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
+	a.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, p := range profiles {
+		a.statsMu.Lock()
+		entry, ok := a.statsCache[p.ID]
+		a.statsMu.Unlock()
+		if ok && time.Since(entry.fetchedAt) < statsMinAge {
+			continue
+		}
+
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			a.refreshOneStat(id)
+		}(p.ID)
+	}
+	wg.Wait()
+	a.refresh()
+}
+
+// refreshOneStat decrypts one profile's cached credential and fetches its
+// usage stats. Both steps are best-effort: any failure is stored as "stats
+// unavailable" rather than surfaced as an app error, since inactive profiles'
+// tokens may simply have expired.
+func (a *app) refreshOneStat(id string) {
+	dir := a.store.ProfileDir(id)
+	cred, err := secret.SessionCredential(dir)
+	if err != nil {
+		logf("stats: decrypt failed for %q: %v", id, err)
+		a.setStatEntry(id, statEntry{err: err})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stats, err := a.usageClient.Fetch(ctx, cred.Token)
+	if err != nil {
+		logf("stats: fetch failed for %q: %v", id, err)
+		a.setStatEntry(id, statEntry{err: err})
+		return
+	}
+	a.setStatEntry(id, statEntry{stats: stats, fetchedAt: time.Now()})
+}
+
+func (a *app) setStatEntry(id string, next statEntry) {
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	if next.err != nil {
+		if prev, ok := a.statsCache[id]; ok && !prev.fetchedAt.IsZero() {
+			next.stats, next.fetchedAt = prev.stats, prev.fetchedAt
+		}
+	}
+	if a.statsCache == nil {
+		a.statsCache = map[string]statEntry{}
+	}
+	a.statsCache[id] = next
+}
+
+// statLineFor renders a profile's cached usage stats for the tray dropdown
+// and Settings window. "—" until the first successful fetch.
+func (a *app) statLineFor(id string) string {
+	a.statsMu.Lock()
+	e, ok := a.statsCache[id]
+	a.statsMu.Unlock()
+	if !ok || e.fetchedAt.IsZero() {
+		return "usage: —"
+	}
+	fh := e.stats.FiveHour
+	line := fmt.Sprintf("%.0f%% of 5-hr limit · resets %s",
+		fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"))
+	if e.err != nil {
+		line += " (stale)"
+	}
+	return line
 }
 
 // settingsContent builds the settings window body: one row per account with
@@ -214,10 +342,17 @@ func (a *app) settingsContent() fyne.CanvasObject {
 			a.runOp(func() error { return a.doRemove(id) })
 		})
 		actions := container.NewHBox(renameBtn, removeBtn)
-		rows.Add(container.NewBorder(nil, nil, widget.NewLabel(name), actions))
+
+		statLabel := widget.NewLabel(a.statLineFor(id))
+		statLabel.Importance = widget.LowImportance
+
+		rows.Add(container.NewVBox(
+			container.NewBorder(nil, nil, widget.NewLabel(name), actions),
+			statLabel,
+		))
 	}
 
-	note := widget.NewLabel("Usage & token stats coming next.")
+	note := widget.NewLabel("Usage stats are best-effort; only the active account's credential is guaranteed fresh.")
 	note.Importance = widget.LowImportance
 	return container.NewBorder(nil, note, nil, nil, container.NewVScroll(rows))
 }
