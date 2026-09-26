@@ -1,4 +1,4 @@
-i name: Release
+name: Release
 
 # Builds native binaries for each OS and attaches them to the GitHub release.
 #
