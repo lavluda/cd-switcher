@@ -21,11 +21,47 @@ type Profile struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// ModeSwitch is one Claude window; switching accounts quits and relaunches it.
+// ModeParallel runs each account in its own window via --user-data-dir.
+const (
+	ModeSwitch   = "switch"
+	ModeParallel = "parallel"
+)
+
 // Config is the switcher's persisted state.
 type Config struct {
 	ActiveProfile string    `json:"activeProfile"`
 	Profiles      []Profile `json:"profiles"`
+	Mode          string    `json:"mode,omitempty"`
+	LaunchAtLogin bool      `json:"launchAtLogin,omitempty"`
+	// WarnAt is the session or weekly percent that sends one notification
+	// until that window resets. Nil uses the default of 80. A pointer to 0
+	// turns the alerts off.
+	WarnAt *int `json:"warnAt,omitempty"`
 }
+
+// DefaultWarnPercent is the limit alert used when WarnAt has never been set.
+const DefaultWarnPercent = 80
+
+// WarnPercent returns the configured alert threshold. Values outside 0–100
+// are clamped. 0 means alerts are off.
+func (c *Config) WarnPercent() int {
+	if c == nil || c.WarnAt == nil {
+		return DefaultWarnPercent
+	}
+	n := *c.WarnAt
+	if n < 0 {
+		return 0
+	}
+	if n > 100 {
+		return 100
+	}
+	return n
+}
+
+// IsParallel reports whether side-by-side windows are the current mode.
+// An empty mode is the original switch behavior.
+func (c *Config) IsParallel() bool { return c.Mode == ModeParallel }
 
 // Store reads and writes the switcher config plus the profile snapshot tree,
 // all rooted at the switcher's own config directory.
@@ -56,6 +92,13 @@ func (s *Store) configPath() string { return filepath.Join(s.root, "config.json"
 
 // Root is the switcher's config directory, used for the log file and snapshots.
 func (s *Store) Root() string { return s.root }
+
+// HistoryPath is where a profile's usage chart is stored, outside the snapshot
+// directory so capturing or running Claude against that directory cannot
+// overwrite it.
+func (s *Store) HistoryPath(id string) string {
+	return filepath.Join(s.root, "history", id+".json")
+}
 
 // ProfileDir returns the snapshot directory for a profile id.
 func (s *Store) ProfileDir(id string) string {
@@ -139,6 +182,27 @@ func (c *Config) Remove(id string) bool {
 			}
 			return true
 		}
+	}
+	return false
+}
+
+// Move shifts a profile one step earlier (delta -1) or later (delta +1) in
+// the menu order. Returns false if the id is missing or the move would pass
+// either end.
+func (c *Config) Move(id string, delta int) bool {
+	if delta != -1 && delta != 1 {
+		return false
+	}
+	for i := range c.Profiles {
+		if c.Profiles[i].ID != id {
+			continue
+		}
+		j := i + delta
+		if j < 0 || j >= len(c.Profiles) {
+			return false
+		}
+		c.Profiles[i], c.Profiles[j] = c.Profiles[j], c.Profiles[i]
+		return true
 	}
 	return false
 }

@@ -56,6 +56,39 @@ func TestConfigRemove(t *testing.T) {
 	}
 }
 
+func TestWarnPercent(t *testing.T) {
+	if got := (&Config{}).WarnPercent(); got != DefaultWarnPercent {
+		t.Fatalf("default = %d, want %d", got, DefaultWarnPercent)
+	}
+	off := 0
+	if got := (&Config{WarnAt: &off}).WarnPercent(); got != 0 {
+		t.Fatalf("off = %d, want 0", got)
+	}
+	n := 70
+	if got := (&Config{WarnAt: &n}).WarnPercent(); got != 70 {
+		t.Fatalf("set = %d, want 70", got)
+	}
+}
+
+func TestConfigMove(t *testing.T) {
+	c := &Config{Profiles: []Profile{{ID: "a"}, {ID: "b"}, {ID: "c"}}}
+	if !c.Move("b", -1) {
+		t.Fatal("Move up failed")
+	}
+	if c.Profiles[0].ID != "b" || c.Profiles[1].ID != "a" {
+		t.Fatalf("order = %+v", c.Profiles)
+	}
+	if c.Move("b", -1) {
+		t.Fatal("Move past the start should fail")
+	}
+	if !c.Move("a", 1) {
+		t.Fatal("Move down failed")
+	}
+	if c.Profiles[2].ID != "a" {
+		t.Fatalf("order = %+v", c.Profiles)
+	}
+}
+
 func TestStoreRemoveSnapshot(t *testing.T) {
 	store, err := NewStoreAt(t.TempDir())
 	if err != nil {

@@ -1,4 +1,4 @@
-name: Release
+i name: Release
 
 # Builds native binaries for each OS and attaches them to the GitHub release.
 #
@@ -64,6 +64,30 @@ jobs:
             libgl1-mesa-dev xorg-dev libxkbcommon-dev \
             libayatana-appindicator3-dev
 
+      - name: Import Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then
+            echo "No Developer ID certificate configured; the dmg stays ad-hoc signed."
+            exit 0
+          fi
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "" "$RUNNER_TEMP/build.keychain"
+          security default-keychain -s "$RUNNER_TEMP/build.keychain"
+          security unlock-keychain -p "" "$RUNNER_TEMP/build.keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$RUNNER_TEMP/build.keychain" \
+            -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$RUNNER_TEMP/build.keychain"
+          identity=$(security find-identity -v -p codesigning "$RUNNER_TEMP/build.keychain" | awk -F'"' '/Developer ID Application/{print $2; exit}')
+          if [ -z "$identity" ]; then
+            echo "Certificate imported but no Developer ID Application identity was found." >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       # macOS: build each arch with clang cross-arch cgo flags, lipo into a
       # universal binary, wrap it in a code-signed .app (menu-bar agent), and
       # package a drag-to-Applications .dmg.
@@ -115,10 +139,18 @@ jobs:
           </dict></plist>
           PLIST
 
-          # Ad-hoc signature so the app runs on Apple Silicon and isn't flagged
-          # as damaged (we have no Developer ID; users still right-click → Open).
-          codesign --force --sign - "$APP/Contents/MacOS/cd-switcher"
-          codesign --force --sign - "$APP"
+          # Developer ID when a signing identity was imported for this run.
+          # Otherwise an ad-hoc signature, which still runs on Apple Silicon
+          # but Gatekeeper treats the download as unnotarized.
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$APP/Contents/MacOS/cd-switcher"
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$APP"
+          else
+            codesign --force --sign - "$APP/Contents/MacOS/cd-switcher"
+            codesign --force --sign - "$APP"
+          fi
           codesign --verify --verbose=2 "$APP"
 
           mkdir dmgroot
@@ -126,6 +158,26 @@ jobs:
           ln -s /Applications dmgroot/Applications
           hdiutil create -volname "CD-Switcher" -srcfolder dmgroot -ov -format UDZO \
             "cd-switcher-${{ matrix.name }}${{ matrix.ext }}"
+
+      - name: Notarize disk image
+        if: runner.os == 'macOS'
+        env:
+          KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          KEY_B64: ${{ secrets.APPLE_NOTARY_KEY }}
+        run: |
+          if [ -z "$KEY_ID" ] || [ -z "$ISSUER" ] || [ -z "$KEY_B64" ]; then
+            echo "No notary credentials configured; skipping notarization."
+            exit 0
+          fi
+          echo "$KEY_B64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          dmg="cd-switcher-darwin-universal.dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "$KEY_ID" \
+            --issuer "$ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
 
       - name: Build
         if: runner.os != 'macOS'

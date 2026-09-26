@@ -125,7 +125,8 @@ func Launch() error {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		// Already up (either a prior attempt took, or it was never down)?
-		if running, err := IsRunning(); err == nil && running {
+		// Side-by-side windows do not count: they use a different data dir.
+		if running, err := defaultRunning(); err == nil && running {
 			return nil
 		}
 		if err := launch(); err != nil {
@@ -133,7 +134,7 @@ func Launch() error {
 		}
 		// Give the launch a moment to register before re-checking / retrying.
 		time.Sleep(1500 * time.Millisecond)
-		if running, err := IsRunning(); err == nil && running {
+		if running, err := defaultRunning(); err == nil && running {
 			return nil
 		}
 		if time.Now().After(deadline) {

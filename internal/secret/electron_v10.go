@@ -41,6 +41,31 @@ func decryptV10(secret, blob []byte) ([]byte, error) {
 	return pkcs7Unpad(pt)
 }
 
+// sealV10 is the inverse of decryptV10, used when a refreshed OAuth token has
+// to be written back into config.json so a rotated refresh token is not lost.
+func sealV10(secret, plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(deriveAESKey(secret))
+	if err != nil {
+		return nil, err
+	}
+	padded := pkcs7Pad(plaintext)
+	iv := bytes.Repeat([]byte{0x20}, aes.BlockSize)
+	ct := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ct, padded)
+	out := make([]byte, 0, len(v10Prefix)+len(ct))
+	out = append(out, v10Prefix...)
+	out = append(out, ct...)
+	return out, nil
+}
+
+func pkcs7Pad(data []byte) []byte {
+	pad := aes.BlockSize - len(data)%aes.BlockSize
+	if pad == 0 {
+		pad = aes.BlockSize
+	}
+	return append(append([]byte(nil), data...), bytes.Repeat([]byte{byte(pad)}, pad)...)
+}
+
 func pkcs7Unpad(data []byte) ([]byte, error) {
 	n := len(data)
 	if n == 0 {
@@ -68,4 +93,12 @@ func pickToken(cache map[string]TokenEntry) (key string, entry TokenEntry, ok bo
 		}
 	}
 	return key, entry, ok
+}
+
+// zero best-effort clears sensitive bytes after use. Go's GC may have already
+// made copies, so this is defense-in-depth, not a guarantee.
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }

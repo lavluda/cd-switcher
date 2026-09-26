@@ -93,4 +93,15 @@ func (t claudeTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 
 func (t claudeTheme) Font(style fyne.TextStyle) fyne.Resource    { return t.base.Font(style) }
 func (t claudeTheme) Icon(name fyne.ThemeIconName) fyne.Resource { return t.base.Icon(name) }
-func (t claudeTheme) Size(name fyne.ThemeSizeName) float32       { return t.base.Size(name) }
+
+func (t claudeTheme) Size(name fyne.ThemeSizeName) float32 {
+	switch name {
+	case theme.SizeNamePadding:
+		return 8
+	case theme.SizeNameInnerPadding:
+		return 12
+	case theme.SizeNameText:
+		return 13
+	}
+	return t.base.Size(name)
+}

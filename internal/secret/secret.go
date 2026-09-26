@@ -28,11 +28,24 @@ type TokenEntry struct {
 	RateLimitTier    string `json:"rateLimitTier"`
 }
 
-// Credential is the bearer token needed to call Claude's usage API, plus its
-// expiry so callers can judge freshness.
+// Credential is the bearer token needed to call Claude's usage API, plus the
+// refresh token and plan metadata stored next to it. CacheKey identifies the
+// oauth:tokenCacheV2 entry so a refresh can be written back to that entry.
 type Credential struct {
-	Token     string
-	ExpiresAt time.Time
+	CacheKey         string
+	Token            string
+	RefreshToken     string
+	ExpiresAt        time.Time
+	SubscriptionType string
+	RateLimitTier    string
+}
+
+// UpdateStoredToken re-encrypts cred back into the profile snapshot's
+// config.json. Call it after a refresh-token grant so a rotated refresh token
+// replaces the one on disk. The access token is still only used in memory for
+// the usage request; this write keeps the stored grant valid.
+func UpdateStoredToken(snapshotDir string, cred Credential) error {
+	return updateStoredToken(snapshotDir, cred)
 }
 
 // SessionCredential decrypts and returns the OAuth bearer token stored in the

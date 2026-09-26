@@ -1,9 +1,11 @@
-//go:build !darwin
+//go:build !darwin && !windows && !linux
 
 package secret
 
-// sessionCredential is unimplemented outside macOS today (Windows DPAPI /
-// Linux libsecret are future work — see docs/settings-and-stats-plan.md).
 func sessionCredential(snapshotDir string) (Credential, error) {
 	return Credential{}, ErrUnsupported
+}
+
+func updateStoredToken(snapshotDir string, cred Credential) error {
+	return ErrUnsupported
 }

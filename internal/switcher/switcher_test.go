@@ -28,6 +28,11 @@ func (f *fakeApp) Launch() error {
 	return nil
 }
 
+func (f *fakeApp) QuitDefault(time.Duration) error    { return f.Quit(0) }
+func (f *fakeApp) LaunchAt(string) error              { return f.Launch() }
+func (f *fakeApp) QuitAt(string, time.Duration) error { return f.Quit(0) }
+func (f *fakeApp) RunningAt(string) (bool, error)     { return false, nil }
+
 func write(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

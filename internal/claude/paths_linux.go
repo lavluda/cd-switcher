@@ -74,8 +74,24 @@ func signalClaudeDesktop(sig syscall.Signal) error {
 
 // launch starts whichever "claude" launcher is on PATH.
 func launch() error {
-	if path, err := exec.LookPath("claude-desktop"); err == nil {
-		return exec.Command(path).Start()
+	path, err := desktopExecutable()
+	if err != nil {
+		return err
 	}
-	return exec.Command("claude").Start()
+	return exec.Command(path).Start()
+}
+
+func launchAt(dir string) error {
+	path, err := desktopExecutable()
+	if err != nil {
+		return err
+	}
+	return exec.Command(path, "--user-data-dir="+dir).Start()
+}
+
+func desktopExecutable() (string, error) {
+	if path, err := exec.LookPath("claude-desktop"); err == nil {
+		return path, nil
+	}
+	return exec.LookPath("claude")
 }

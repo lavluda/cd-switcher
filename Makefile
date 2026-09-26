@@ -7,10 +7,17 @@
 
 BIN := cd-switcher
 
+# On macOS the Go toolchain appends -lobjc once per cgo package containing .m
+# files (Fyne, glfw, systray, ...), so the Xcode 15+ linker warns about the
+# duplicates. Harmless, but noisy — silence it on darwin only.
+ifeq ($(shell uname -s),Darwin)
+GOFLAGS_LD := -ldflags=-extldflags=-Wl,-no_warn_duplicate_libraries
+endif
+
 .PHONY: build run test fmt vet clean windows
 
 build:
-	go build -o bin/$(BIN) .
+	go build $(GOFLAGS_LD) -o bin/$(BIN) .
 
 run: build
 	./bin/$(BIN)

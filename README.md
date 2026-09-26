@@ -46,6 +46,29 @@ A **profile** is a snapshot of that data directory (minus pure caches). Switchin
 
 Snapshots and config live under `<user-config-dir>/cd-switcher/`.
 
+MCP servers and extensions (`claude_desktop_config.json`, `Claude Extensions`,
+and the extension install lists) stay in the live data directory. Switching
+accounts does not replace them, and side-by-side windows symlink those files
+back to the same copies.
+
+## Modes
+
+**Switch accounts** (the default) is the flow above: one Claude window, and
+picking an account quits, swaps, and relaunches.
+
+**Side by side** quits that window and opens each account with its own
+`--user-data-dir`, so more than one Claude window can stay open. Turn it on
+in Settings. Claude has to accept a second process; if a window does not stay
+open, switch back to one account.
+
+Control-Option-S opens the next account. The tray menu can also switch to,
+or open, the account with the most session room left. On macOS, Settings can
+launch CD-Switcher at login.
+
+Settings notifies you once when a session or weekly limit reaches 80% (or
+70% or 90%). The notice stays quiet until that window resets, or until usage
+falls back under the line. Choose Off to silence it.
+
 ## Usage
 
 ```sh
@@ -60,14 +83,18 @@ A tray icon appears.
   login. Sign into the other account, then choose **Save this account**.
 - Click any profile in the menu to switch to it.
 
-### Usage stats (macOS only)
+### Usage stats
 
-Each profile shows a compact usage line — e.g. `42% of 5-hr limit · resets
-3:00pm` — under its entry in the tray dropdown and in **Settings…**, refreshed
-every few minutes and whenever Settings is opened. This is best-effort: only
-the **active** account's stored token is guaranteed fresh, so inactive
-profiles may show `—` until you switch to them. Currently macOS-only; Windows
-and Linux show `—` for now.
+Each profile shows a compact usage line — e.g. `42% of session · resets
+3:00pm` — under its entry in the tray dropdown. **Settings…** shows every
+limit window Claude returns (session, week, and model windows such as Opus),
+extra usage as real spend, and token totals when the usage response includes
+them. Claude's plan API reports how full each limit is, not a token ledger,
+so a percentage is the real reading unless token counts are present. Stats
+refresh every few minutes and whenever Settings is opened. This is
+best-effort: only the **active** account's stored token is guaranteed fresh,
+so inactive profiles may show `—` until a refresh succeeds. Windows uses
+DPAPI and Linux uses libsecret for the same decrypt.
 
 The first fetch triggers a one-time macOS Keychain prompt ("cd-switcher wants
 to access Claude Safe Storage") — approving it grants persistent read access
@@ -80,12 +107,13 @@ revoking, usage stats fail soft to `—` until re-approved.
 
 ```sh
 make build      # native (macOS/Linux/Windows — run on the target OS)
-make windows    # cross-compile a Windows .exe from any host (no cgo)
+make windows    # prints the fyne-cross command; Fyne cannot cross-compile without cgo
 make test       # unit tests for the snapshot/restore logic
 ```
 
-The tray and macOS launch code use cgo, so native binaries are built on their
-target OS. Windows uses pure-Go syscalls and cross-compiles from anywhere.
+The UI uses Fyne (OpenGL + cgo), so every binary is built on its target OS.
+A Windows build needs [fyne-cross](https://github.com/fyne-io/fyne-cross) or a
+Windows host with a C toolchain. `make windows` only prints that command.
 
 ## Safety notes
 
@@ -96,16 +124,18 @@ target OS. Windows uses pure-Go syscalls and cross-compiles from anywhere.
   VM image (`vm_bundles`, multiple GB) are never copied — Claude regenerates them,
   and copying them per profile would bloat snapshots and risk filling the disk.
 - Account labels are entered by you — emails live only inside encrypted blobs.
-- Usage stats (macOS only) decrypt a profile's cached OAuth token transiently, in
-  memory, solely to call Anthropic's own usage API for display — the token is
-  never written to disk or logged. Fetches are best-effort and infrequent (every
-  few minutes) since the endpoint is undocumented and may change without notice.
+- Usage stats decrypt a profile's cached OAuth token in memory to call
+  Anthropic's usage API. On macOS the key comes from the Keychain; on Windows
+  from DPAPI; on Linux from libsecret. When an idle account's token is near
+  expiry, a refresh grant is requested and, if the server rotates the refresh
+  token, that new grant is written back into the profile's encrypted
+  `config.json`. The access token itself is not logged. Fetches stay infrequent
+  (every few minutes) because the endpoint is undocumented.
 
 ## Status / roadmap
 
-- v1 swaps a single live instance. Running both accounts **simultaneously** via
-  Electron `--user-data-dir` is an unverified future spike.
-- MCP / extension config currently travels with each profile; making it shared
-  across accounts is a possible refinement.
-- Usage stats are macOS-only for now; Windows (DPAPI) and Linux (libsecret) are
-  possible future additions.
+- Switch accounts is the default. Side by side is the other mode in Settings.
+- A Developer ID signature and notarization run on release when
+  `APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY`,
+  `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` are set on the repo.
+  Without them the disk image stays ad-hoc signed.

@@ -41,8 +41,28 @@ func TestIsClaudeDesktopProcess(t *testing.T) {
 			want: false,
 		},
 		{
+			// Third-party "Claude Usage.app" menu-bar tool: name has the
+			// "claude" prefix but it is not Desktop. Must NOT match, or Quit()
+			// blocks until timeout waiting for a process it can't kill.
+			name: "Claude Usage",
+			exe:  "/Applications/Claude Usage.app/Contents/MacOS/Claude Usage",
+			want: false,
+		},
+		{
+			// Same lookalike with an unreadable exe path: rejected by name.
+			name: "Claude Usage",
+			exe:  "",
+			want: false,
+		},
+		{
 			// Desktop main with no readable exe path still matches on name.
 			name: "Claude",
+			exe:  "",
+			want: true,
+		},
+		{
+			// Desktop helper with no readable exe path matches on name.
+			name: "Claude Helper (Renderer)",
 			exe:  "",
 			want: true,
 		},

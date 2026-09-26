@@ -25,7 +25,7 @@ func newSparkline(samples []usage.Sample) *sparkline {
 	return s
 }
 
-func (s *sparkline) MinSize() fyne.Size { return fyne.NewSize(1, 70) }
+func (s *sparkline) MinSize() fyne.Size { return fyne.NewSize(1, 48) }
 
 func (s *sparkline) CreateRenderer() fyne.WidgetRenderer {
 	r := &sparklineRenderer{spark: s}

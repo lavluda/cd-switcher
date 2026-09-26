@@ -74,7 +74,7 @@ func BackupLive(liveDir, backupDir string) error {
 		return err
 	}
 	for _, e := range entries {
-		if denylist[e.Name()] {
+		if skipEntry(e.Name()) {
 			continue
 		}
 		if err := os.Rename(filepath.Join(liveDir, e.Name()), filepath.Join(backupDir, e.Name())); err != nil {
@@ -116,7 +116,7 @@ func clearNonCache(dir string) error {
 		return err
 	}
 	for _, e := range entries {
-		if denylist[e.Name()] {
+		if skipEntry(e.Name()) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
@@ -135,7 +135,7 @@ func copyTree(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		if denylist[e.Name()] {
+		if skipEntry(e.Name()) {
 			continue
 		}
 		if err := copyEntry(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {

@@ -20,14 +20,24 @@ const quitTimeout = 15 * time.Second
 // orchestration can be tested without quitting/launching the real app.
 type AppController interface {
 	Quit(timeout time.Duration) error
+	QuitDefault(timeout time.Duration) error
 	Launch() error
+	LaunchAt(dataDir string) error
+	QuitAt(dataDir string, timeout time.Duration) error
+	RunningAt(dataDir string) (bool, error)
 }
 
 // realApp drives the actual Claude Desktop app via the claude package.
 type realApp struct{}
 
-func (realApp) Quit(timeout time.Duration) error { return claude.Quit(timeout) }
-func (realApp) Launch() error                    { return claude.Launch() }
+func (realApp) Quit(timeout time.Duration) error        { return claude.Quit(timeout) }
+func (realApp) QuitDefault(timeout time.Duration) error { return claude.QuitDefault(timeout) }
+func (realApp) Launch() error                           { return claude.Launch() }
+func (realApp) LaunchAt(dir string) error               { return claude.LaunchAt(dir) }
+func (realApp) QuitAt(dir string, timeout time.Duration) error {
+	return claude.QuitAt(dir, timeout)
+}
+func (realApp) RunningAt(dir string) (bool, error) { return claude.DataDirRunning(dir) }
 
 // Switcher couples the profile store with the live Claude data dir.
 type Switcher struct {
@@ -156,12 +166,84 @@ func (s *Switcher) restoreWithRollback(targetID string) error {
 	return os.RemoveAll(bak)
 }
 
+// SetMode moves between one-window switching and side-by-side windows.
+// Entering side-by-side quits the single window and saves its account first.
+// Leaving it closes every side-by-side window and restores the active account
+// into the normal Claude data directory.
+func (s *Switcher) SetMode(cfg *profile.Config, mode string) error {
+	if mode != profile.ModeSwitch && mode != profile.ModeParallel {
+		return fmt.Errorf("unknown mode %q", mode)
+	}
+	current := cfg.Mode
+	if current == "" {
+		current = profile.ModeSwitch
+	}
+	if current == mode {
+		return nil
+	}
+	if mode == profile.ModeParallel {
+		if err := s.ensureQuit(); err != nil {
+			return err
+		}
+		if err := s.CaptureActive(cfg); err != nil {
+			return fmt.Errorf("sync active profile: %w", err)
+		}
+		cfg.Mode = profile.ModeParallel
+		return s.store.Save(cfg)
+	}
+
+	for _, p := range cfg.Profiles {
+		_ = s.app.QuitAt(s.store.ProfileDir(p.ID), quitTimeout)
+	}
+	if err := s.ensureQuit(); err != nil {
+		return err
+	}
+	if active, ok := cfg.Active(); ok {
+		if err := s.restoreWithRollback(active.ID); err != nil {
+			return err
+		}
+	}
+	cfg.Mode = profile.ModeSwitch
+	if err := s.store.Save(cfg); err != nil {
+		return err
+	}
+	return s.app.Launch()
+}
+
+// OpenParallel launches the account in its own window. Shared MCP and
+// extension files are linked back to the live data directory first.
+func (s *Switcher) OpenParallel(cfg *profile.Config, id string) error {
+	if _, ok := cfg.Find(id); !ok {
+		return fmt.Errorf("unknown profile %q", id)
+	}
+	dir := s.store.ProfileDir(id)
+	if err := profile.LinkShared(s.liveDir, dir); err != nil {
+		return fmt.Errorf("link shared config: %w", err)
+	}
+	if running, err := s.app.RunningAt(dir); err == nil && running {
+		return nil
+	}
+	return s.app.LaunchAt(dir)
+}
+
+// CloseParallel quits the window that was started for one account.
+func (s *Switcher) CloseParallel(id string) error {
+	return s.app.QuitAt(s.store.ProfileDir(id), quitTimeout)
+}
+
 // PrepareCleanLogin quits Claude, snapshots the active account, clears the live
 // dir to a logged-out state, then relaunches Claude so the user can sign into a
 // new account. After they log in, the caller captures it via CaptureAs. Marks
-// no profile active while the new login is pending.
+// no profile active while the new login is pending. In side-by-side mode only
+// the window that uses the normal data directory is quit.
 func (s *Switcher) PrepareCleanLogin(cfg *profile.Config) error {
-	if err := s.ensureQuit(); err != nil {
+	// A fresh login uses the normal data directory. Side-by-side windows keep
+	// their own directories, so they can stay open.
+	if cfg.IsParallel() {
+		if err := s.app.QuitDefault(quitTimeout); err != nil {
+			return fmt.Errorf("could not quit Claude Desktop: %w", err)
+		}
+	} else if err := s.ensureQuit(); err != nil {
 		return err
 	}
 	if err := s.CaptureActive(cfg); err != nil {

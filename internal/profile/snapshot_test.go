@@ -41,6 +41,7 @@ func makeLive(t *testing.T) string {
 	writeFile(t, filepath.Join(live, "Local Storage", "leveldb", "000.ldb"), "ldbA")
 	writeFile(t, filepath.Join(live, "Cache", "big.bin"), "cacheA")                             // denylisted
 	writeFile(t, filepath.Join(live, "vm_bundles", "claudevm.bundle", "rootfs.img"), "vmimage") // denylisted
+	writeFile(t, filepath.Join(live, "claude_desktop_config.json"), `{"mcp":"shared"}`)         // shared
 	return live
 }
 
@@ -63,6 +64,9 @@ func TestCaptureSkipsCacheAndCopiesNested(t *testing.T) {
 	}
 	if exists(filepath.Join(snap, "vm_bundles")) {
 		t.Error("vm_bundles (multi-GB VM image) should not be captured")
+	}
+	if exists(filepath.Join(snap, "claude_desktop_config.json")) {
+		t.Error("MCP config should stay out of the snapshot")
 	}
 }
 
@@ -90,6 +94,9 @@ func TestRestoreReplacesIdentityKeepsCache(t *testing.T) {
 	if got := readFile(t, filepath.Join(live, "Cache", "big.bin")); got != "cacheA" {
 		t.Errorf("cache should be preserved, got %q", got)
 	}
+	if got := readFile(t, filepath.Join(live, "claude_desktop_config.json")); got != `{"mcp":"shared"}` {
+		t.Errorf("MCP config should survive a restore, got %q", got)
+	}
 }
 
 func TestBackupAndRollbackRoundTrips(t *testing.T) {
@@ -105,6 +112,9 @@ func TestBackupAndRollbackRoundTrips(t *testing.T) {
 	}
 	if !exists(filepath.Join(live, "Cache", "big.bin")) {
 		t.Error("cache should remain during backup")
+	}
+	if !exists(filepath.Join(live, "claude_desktop_config.json")) {
+		t.Error("MCP config should stay in the live dir during backup")
 	}
 
 	// Simulate a half-written restore, then roll back.
@@ -133,6 +143,34 @@ func TestClearLeavesCache(t *testing.T) {
 	}
 	if !exists(filepath.Join(live, "Cache", "big.bin")) {
 		t.Error("Clear should keep cache")
+	}
+	if !exists(filepath.Join(live, "claude_desktop_config.json")) {
+		t.Error("Clear should keep shared MCP config")
+	}
+}
+
+func TestLinkSharedReplacesProfileCopy(t *testing.T) {
+	live := t.TempDir()
+	profileDir := t.TempDir()
+	writeFile(t, filepath.Join(live, "claude_desktop_config.json"), `{"mcp":"live"}`)
+	writeFile(t, filepath.Join(profileDir, "claude_desktop_config.json"), `{"mcp":"old"}`)
+
+	if err := LinkShared(live, profileDir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(profileDir, "claude_desktop_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"mcp":"live"}` {
+		t.Fatalf("linked config = %q", got)
+	}
+	info, err := os.Lstat(filepath.Join(profileDir, "claude_desktop_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("shared config should be a symlink")
 	}
 }
 

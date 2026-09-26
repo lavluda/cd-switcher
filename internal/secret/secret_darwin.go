@@ -37,13 +37,6 @@ func readKeychainSecret() ([]byte, error) {
 	return bytes.TrimRight(out, "\n"), nil
 }
 
-// configFile is the subset of a Claude Desktop config.json this package
-// reads. The field is typed []byte so encoding/json base64-decodes the
-// Electron safeStorage-encrypted blob for us.
-type configFile struct {
-	TokenCacheV2 []byte `json:"oauth:tokenCacheV2"`
-}
-
 func sessionCredential(snapshotDir string) (Credential, error) {
 	secret, err := keychainSecret()
 	if err != nil {
@@ -75,18 +68,14 @@ func sessionCredential(snapshotDir string) (Credential, error) {
 		return Credential{}, fmt.Errorf("%w: parse token cache: %v", ErrNoCredential, err)
 	}
 
-	_, entry, ok := pickToken(cache)
-	if !ok {
-		return Credential{}, ErrNoCredential
-	}
-	return Credential{Token: entry.Token, ExpiresAt: time.UnixMilli(entry.ExpiresAt)}, nil
+	return credentialFromCache(cache)
 }
 
-// zero best-effort clears sensitive bytes after use. Go's GC may have already
-// made copies (e.g. during append/growslice), so this is defense-in-depth,
-// not a guarantee.
-func zero(b []byte) {
-	for i := range b {
-		b[i] = 0
+func updateStoredToken(snapshotDir string, cred Credential) error {
+	osSecret, err := keychainSecret()
+	if err != nil {
+		return err
 	}
+	defer zero(osSecret)
+	return writeCredentialFile(filepath.Join(snapshotDir, "config.json"), osSecret, cred)
 }

@@ -60,6 +60,14 @@ func launch() error {
 	return exec.Command(exe).Start()
 }
 
+func launchAt(dir string) error {
+	exe := findExecutable()
+	if exe == "" {
+		return exec.Command("cmd", "/C", "start", "", "claude.exe", "--user-data-dir="+dir).Start()
+	}
+	return exec.Command(exe, "--user-data-dir="+dir).Start()
+}
+
 func findExecutable() string {
 	local := os.Getenv("LOCALAPPDATA")
 	if local == "" {

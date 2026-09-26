@@ -62,6 +62,74 @@ func TestFetchNon2xx(t *testing.T) {
 	}
 }
 
+func TestFetchRicherOrgUsageAndTokens(t *testing.T) {
+	const org = "11111111-2222-4333-8444-555555555555"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/oauth/usage":
+			w.Write([]byte(`{"five_hour":{"utilization":1,"resets_at":"2026-07-14T15:00:00Z"}}`))
+		case "/api/oauth/profile":
+			w.Write([]byte(`{"organization":{"uuid":"` + org + `"}}`))
+		case "/api/organizations/" + org + "/usage":
+			w.Write([]byte(`{
+				"five_hour": {"utilization": 40, "resets_at": 1784041200, "input_tokens": 1200, "output_tokens": 300},
+				"seven_day": {"utilization": null, "resets_at": "2026-07-20T00:00:00Z"},
+				"seven_day_opus": {"utilization": 8, "resets_at": "2026-07-20T00:00:00Z"},
+				"extra_usage": {"is_enabled": true, "monthly_limit": 2000, "used_credits": 150, "utilization": 7.5, "currency": "USD"},
+				"input_tokens": 50000,
+				"output_tokens": 8000,
+				"limits": [{"kind": "weekly_scoped", "percent": 15, "resets_at": "2026-07-20T00:00:00Z", "scope": {"model": {"display_name": "Haiku"}}}]
+			}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := newClientWithBase(srv.URL, http.DefaultClient)
+	stats, err := c.Fetch(context.Background(), "test-token")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if stats.FiveHour.Utilization != 40 {
+		t.Errorf("FiveHour = %v, want org payload 40", stats.FiveHour.Utilization)
+	}
+	if stats.FiveHour.CountLabel() != "1.2k in · 300 out" {
+		t.Errorf("CountLabel = %q", stats.FiveHour.CountLabel())
+	}
+	if stats.SevenDayOpus.Utilization != 8 {
+		t.Errorf("Opus = %v", stats.SevenDayOpus.Utilization)
+	}
+	if stats.Tokens.Input != 50000 || stats.Tokens.Output != 8000 {
+		t.Errorf("Tokens = %+v", stats.Tokens)
+	}
+	if stats.ExtraUsage.SpendLabel() != "Extra $1.50 of $20.00" {
+		t.Errorf("SpendLabel = %q", stats.ExtraUsage.SpendLabel())
+	}
+	labels := map[string]bool{}
+	for _, m := range stats.Meters() {
+		labels[m.Label] = true
+	}
+	for _, want := range []string{"Session", "This week", "Opus", "Haiku"} {
+		if !labels[want] {
+			t.Errorf("meters missing %q: %+v", want, stats.Meters())
+		}
+	}
+	wantReset := time.Unix(1784041200, 0).UTC()
+	if !stats.FiveHour.ResetsAt.Equal(wantReset) {
+		t.Errorf("numeric resets_at = %v, want %v", stats.FiveHour.ResetsAt, wantReset)
+	}
+
+	// The organization id is cached, so a second fetch skips the profile call
+	// and still returns the richer payload.
+	again, err := c.Fetch(context.Background(), "test-token")
+	if err != nil || again.Tokens.Total() != stats.Tokens.Total() {
+		t.Fatalf("cached fetch = %+v, %v", again.Tokens, err)
+	}
+}
+
 func TestFetchMalformedBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("not json"))
