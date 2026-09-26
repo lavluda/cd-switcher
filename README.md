@@ -5,6 +5,18 @@ Desktop** and relaunches it signed into the account you pick. Built for people w
 juggle two (or more) Claude accounts and prefer the desktop app, which has no
 native multi-account support.
 
+## Install
+
+On macOS, with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask lavluda/tap/cd-switcher
+```
+
+Homebrew asks you to trust `lavluda/tap` the first time you install from it. That installs `CD-Switcher.app`. Launch it from Spotlight, or run `open -a CD-Switcher`.
+
+To build from source instead, see [Build](#build).
+
 ## How it works
 
 Claude Desktop stores a single logged-in identity in one data directory:

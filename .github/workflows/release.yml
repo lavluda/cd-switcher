@@ -140,3 +140,36 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: cd-switcher-${{ matrix.name }}${{ matrix.ext }}
           fail_on_unmatched_files: true
+
+      # Same tap k8s-pods-viewer publishes to. TAP_GITHUB_TOKEN needs contents
+      # write on lavluda/homebrew-tap.
+      - name: Publish Homebrew cask
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "TAP_GITHUB_TOKEN is not set; cannot update lavluda/homebrew-tap" >&2
+            exit 1
+          fi
+          version="${TAG#v}"
+          dmg="cd-switcher-${{ matrix.name }}${{ matrix.ext }}"
+          sha=$(shasum -a 256 "$dmg" | awk '{print $1}')
+
+          git clone --depth 1 https://github.com/lavluda/homebrew-tap.git "$RUNNER_TEMP/homebrew-tap"
+          cask="$RUNNER_TEMP/homebrew-tap/Casks/cd-switcher.rb"
+          sed -i '' "s/^  version \".*\"/  version \"${version}\"/" "$cask"
+          sed -i '' "s/^  sha256 \".*\"/  sha256 \"${sha}\"/" "$cask"
+
+          git -C "$RUNNER_TEMP/homebrew-tap" config user.name "S M Ibrahim"
+          git -C "$RUNNER_TEMP/homebrew-tap" config user.email "smibrahim@gmail.com"
+          git -C "$RUNNER_TEMP/homebrew-tap" add Casks/cd-switcher.rb
+          if git -C "$RUNNER_TEMP/homebrew-tap" diff --cached --quiet; then
+            echo "Homebrew cask already at ${TAG}"
+            exit 0
+          fi
+          git -C "$RUNNER_TEMP/homebrew-tap" commit -m "Brew cask update for cd-switcher version ${TAG}"
+          gh auth setup-git
+          git -C "$RUNNER_TEMP/homebrew-tap" push origin HEAD
