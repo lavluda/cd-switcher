@@ -95,3 +95,12 @@ func desktopExecutable() (string, error) {
 	}
 	return exec.LookPath("claude")
 }
+
+// mainLogPath is where Claude Desktop writes its main-process log.
+func mainLogPath() (string, error) {
+	dir, err := dataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "logs", "main.log"), nil
+}

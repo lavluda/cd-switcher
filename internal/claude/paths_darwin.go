@@ -69,3 +69,12 @@ func launch() error {
 func launchAt(dir string) error {
 	return exec.Command("open", "-n", "-a", "Claude", "--args", "--user-data-dir="+dir).Start()
 }
+
+// mainLogPath is where Claude Desktop writes its main-process log.
+func mainLogPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "Logs", "Claude", "main.log"), nil
+}

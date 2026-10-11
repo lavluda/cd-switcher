@@ -156,6 +156,7 @@ func (a *app) setup() {
 	a.buildAndSetMenu()
 	go a.firstRunIfNeeded()
 	go a.startStatsLoop()
+	go a.watchParallelWindows()
 }
 
 // buildAndSetMenu rebuilds the tray menu from current state and installs it.
@@ -280,6 +281,76 @@ const statsMinAge = 60 * time.Second
 
 // restorePollInterval is how often side-by-side windows are checked for having
 // vanished.
+const restorePollInterval = 5 * time.Second
+
+// watchParallelWindows reopens side-by-side windows that Claude closed to
+// install an update. Claude's updater relaunches without --user-data-dir, so
+// the windows would otherwise stay gone. Windows the user closed themselves are
+// left alone: only an update restart in Claude's log triggers a reopen.
+func (a *app) watchParallelWindows() {
+	r := switcher.NewRestorer()
+	for range time.Tick(restorePollInterval) {
+		a.mu.Lock()
+		parallel := a.cfg.IsParallel()
+		var ids []string
+		for _, p := range a.cfg.Profiles {
+			ids = append(ids, p.ID)
+		}
+		a.mu.Unlock()
+		if !parallel {
+			r = switcher.NewRestorer()
+			continue
+		}
+
+		running := map[string]bool{}
+		dirs, err := claude.RunningDataDirs()
+		if err != nil {
+			continue
+		}
+		for _, dir := range dirs {
+			for _, id := range ids {
+				if abs, err := filepath.Abs(a.store.ProfileDir(id)); err == nil && filepath.Clean(abs) == dir {
+					running[id] = true
+				}
+			}
+		}
+
+		updateQuit, _ := claude.LastUpdateQuit()
+		now := time.Now()
+		r.Observe(now, ids, running, updateQuit)
+
+		due := r.Due(now)
+		if len(due) == 0 {
+			continue
+		}
+		// One operation for all windows: runOp drops a second request while one
+		// is queued, and the worker keeps file changes from overlapping.
+		select {
+		case a.ops <- func() error { return a.doRestoreParallel(due) }:
+			r.Done(due)
+		default: // worker is busy; try again next tick
+		}
+	}
+}
+
+// doRestoreParallel reopens windows that an update restart closed.
+func (a *app) doRestoreParallel(ids []string) error {
+	if a.sw == nil {
+		return errors.New("Claude Desktop data directory not found")
+	}
+	for _, id := range ids {
+		p, ok := a.cfg.Find(id)
+		if !ok {
+			continue
+		}
+		logf("reopening side-by-side window for %q after a Claude update", p.Label)
+		if err := a.sw.OpenParallel(a.cfg, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // startStatsLoop fetches usage stats once immediately, then on a timer, for
 // as long as the app runs. It never touches a.ops/opWorker (reserved for
 // file-mutating account operations) and never blocks the UI thread.
