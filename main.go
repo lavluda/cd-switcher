@@ -23,6 +23,7 @@ import (
 	"github.com/ncruces/zenity"
 
 	"github.com/lavluda/cd-switcher/internal/claude"
+	"github.com/lavluda/cd-switcher/internal/dockicon"
 	"github.com/lavluda/cd-switcher/internal/hotkey"
 	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/login"
@@ -101,6 +102,13 @@ func main() {
 	a.desk = desk
 
 	a.setup()
+	// Menu-bar-only app: no Dock icon. Must run right before Run(): Fyne's
+	// GLFW/Cocoa init sets the activation policy to Regular itself — "in
+	// case we are unbundled, make us a proper UI application" — so hiding it
+	// has to happen after that init, not before. The release .app bundle
+	// also sets LSUIElement in Info.plist, but a plain dev binary has no
+	// bundle for that to live in.
+	dockicon.Hide()
 	a.fyneApp.Run()
 }
 
@@ -270,6 +278,8 @@ const statsInterval = 5 * time.Minute
 // fresh, so opening Settings repeatedly doesn't spam the endpoint.
 const statsMinAge = 60 * time.Second
 
+// restorePollInterval is how often side-by-side windows are checked for having
+// vanished.
 // startStatsLoop fetches usage stats once immediately, then on a timer, for
 // as long as the app runs. It never touches a.ops/opWorker (reserved for
 // file-mutating account operations) and never blocks the UI thread.
