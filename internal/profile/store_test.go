@@ -70,6 +70,20 @@ func TestWarnPercent(t *testing.T) {
 	}
 }
 
+func TestAutoCheckUpdatesEnabled(t *testing.T) {
+	if !(&Config{}).AutoCheckUpdatesEnabled() {
+		t.Fatal("default should be enabled")
+	}
+	off := false
+	if (&Config{AutoCheckUpdates: &off}).AutoCheckUpdatesEnabled() {
+		t.Fatal("explicit false should be disabled")
+	}
+	on := true
+	if !(&Config{AutoCheckUpdates: &on}).AutoCheckUpdatesEnabled() {
+		t.Fatal("explicit true should be enabled")
+	}
+}
+
 func TestConfigMove(t *testing.T) {
 	c := &Config{Profiles: []Profile{{ID: "a"}, {ID: "b"}, {ID: "c"}}}
 	if !c.Move("b", -1) {

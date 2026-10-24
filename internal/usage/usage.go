@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -352,7 +353,7 @@ func (c *Client) get(ctx context.Context, token, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
+		return nil, fmt.Errorf("%w: status %d: %s", ErrUnavailable, resp.StatusCode, snippet(body, 200))
 	}
 	return body, nil
 }
@@ -394,6 +395,26 @@ func (c *Client) storeOrg(token, id string) {
 func tokenKey(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:8])
+}
+
+// snippet trims body to at most n bytes (on a rune boundary) and collapses
+// newlines, so an error log line stays on one line instead of dumping a full
+// HTML/JSON error page.
+func snippet(body []byte, n int) string {
+	s := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, string(body))
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func mergeStats(primary, fallback Stats) Stats {

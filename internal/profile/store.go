@@ -34,10 +34,42 @@ type Config struct {
 	Profiles      []Profile `json:"profiles"`
 	Mode          string    `json:"mode,omitempty"`
 	LaunchAtLogin bool      `json:"launchAtLogin,omitempty"`
+	// LaunchAtLoginAsked marks that the user has already been asked (or has
+	// used the Settings checkbox) about opening at login, so the one-time
+	// first-run prompt does not nag on every later launch.
+	LaunchAtLoginAsked bool `json:"launchAtLoginAsked,omitempty"`
 	// WarnAt is the session or weekly percent that sends one notification
 	// until that window resets. Nil uses the default of 80. A pointer to 0
 	// turns the alerts off.
 	WarnAt *int `json:"warnAt,omitempty"`
+	// ShowMultipleProfiles draws every profile as its own compact swatch in
+	// the tray icon, instead of a single icon for the app as a whole.
+	ShowMultipleProfiles bool `json:"showMultipleProfiles,omitempty"`
+	// AutoSwitchOnLimit, when set, switches away from the active profile the
+	// moment its session usage reaches 100%, picking whichever other profile
+	// has the most room left.
+	AutoSwitchOnLimit bool `json:"autoSwitchOnLimit,omitempty"`
+	// AutoCheckUpdates controls the daily background check against GitHub's
+	// latest release. Nil (never set) defaults to on — see
+	// AutoCheckUpdatesEnabled.
+	AutoCheckUpdates *bool `json:"autoCheckUpdates,omitempty"`
+	// LastUpdateCheck is when a GitHub release check last completed
+	// (successfully or not), so the tray's update row and the daily
+	// background loop both know whether one is due.
+	LastUpdateCheck time.Time `json:"lastUpdateCheck,omitempty"`
+	// LatestVersion/LatestVersionURL cache the last known GitHub release, so
+	// the tray menu has something to show the moment it opens rather than
+	// waiting on a network call.
+	LatestVersion    string `json:"latestVersion,omitempty"`
+	LatestVersionURL string `json:"latestVersionURL,omitempty"`
+}
+
+// AutoCheckUpdatesEnabled reports whether the daily background update check
+// is on. Defaults to true — the common case for a small tray app is to let it
+// quietly tell you when it's out of date, same as the reference "Automatic
+// Updates" checkbox this mirrors.
+func (c *Config) AutoCheckUpdatesEnabled() bool {
+	return c == nil || c.AutoCheckUpdates == nil || *c.AutoCheckUpdates
 }
 
 // DefaultWarnPercent is the limit alert used when WarnAt has never been set.

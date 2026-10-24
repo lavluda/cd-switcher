@@ -62,12 +62,31 @@ in Settings. Claude has to accept a second process; if a window does not stay
 open, switch back to one account.
 
 Control-Option-S opens the next account. The tray menu can also switch to,
-or open, the account with the most session room left. On macOS, Settings can
-launch CD-Switcher at login.
+or open, the account with the most session room left.
 
-Settings notifies you once when a session or weekly limit reaches 80% (or
-70% or 90%). The notice stays quiet until that window resets, or until usage
-falls back under the line. Choose Off to silence it.
+## Settings
+
+Three tabs.
+
+**General** — switching mode, limit alerts, open at login (macOS), and
+automatic update checks. Limit alerts notify you once when a session or
+weekly limit reaches 80% (or 70% or 90%); the notice stays quiet until that
+window resets, or until usage falls back under the line. Choose Off to
+silence it.
+
+**Manage Profiles** — two toggles:
+
+- **Show Multiple Profiles** draws one compact colored swatch per profile in
+  the menu bar, with a ring around the active one, instead of a single app
+  icon. Takes effect with more than one profile.
+- **Enable Auto-Switch** switches away from the active account the moment its
+  session usage reaches 100%, to whichever other profile has the most room
+  left. It fires once per limit window, and does nothing in side-by-side mode
+  (where every account is already open). Needs at least two profiles.
+
+**Accounts** — every captured account with its live plan meters, a chart of
+the last day of session usage on a 0-100% axis, and the switch, reorder,
+rename, and remove actions.
 
 ## Usage
 
@@ -78,7 +97,9 @@ make build      # -> bin/cd-switcher
 
 A tray icon appears.
 
-- **First run** offers to capture the account you're currently signed into.
+- **First run** offers to capture the account you're currently signed into,
+  and (on macOS) asks once whether to open CD-Switcher at login. Settings can
+  change that answer later.
 - **Add account…** quits Claude, saves the current account, and opens a fresh
   login. Sign into the other account, then choose **Save this account**.
 - Click any profile in the menu to switch to it.
@@ -103,12 +124,24 @@ Safe Storage", open the generic-password item's **Access Control** tab, and
 remove cd-switcher (or re-enable "Confirm before allowing access"). After
 revoking, usage stats fail soft to `—` until re-approved.
 
+## Updates
+
+CD-Switcher checks GitHub once a day for a newer release and shows **Update
+available: vX.Y.Z** in the tray menu when there is one, opening the release
+page when clicked. **Check for Updates** runs one on demand, and the General
+tab turns the daily check off. The check only reads GitHub's public release
+metadata — it downloads and installs nothing, because `brew upgrade` and the
+releases page already do that.
+
+Released binaries are stamped with their tag at build time. A local `make
+build` reports its version as `dev` and never claims to be out of date.
+
 ## Build
 
 ```sh
 make build      # native (macOS/Linux/Windows — run on the target OS)
 make windows    # prints the fyne-cross command; Fyne cannot cross-compile without cgo
-make test       # unit tests for the snapshot/restore logic
+make test       # unit tests (snapshot/restore, usage parsing, icons, update checks)
 ```
 
 The UI uses Fyne (OpenGL + cgo), so every binary is built on its target OS.
@@ -135,6 +168,8 @@ Windows host with a C toolchain. `make windows` only prints that command.
 ## Status / roadmap
 
 - Switch accounts is the default. Side by side is the other mode in Settings.
+- Update notifications work from v0.2.0 on: earlier binaries were built
+  without a stamped version, so they never report themselves as behind.
 - A Developer ID signature and notarization run on release when
   `APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY`,
   `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` are set on the repo.

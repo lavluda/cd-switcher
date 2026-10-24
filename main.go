@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,8 +32,15 @@ import (
 	"github.com/lavluda/cd-switcher/internal/secret"
 	"github.com/lavluda/cd-switcher/internal/switcher"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
+	"github.com/lavluda/cd-switcher/internal/updatecheck"
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
+
+// version is set at build time via -ldflags "-X main.version=vX.Y.Z" (the
+// release workflow does this for every published binary). A plain "go build"
+// leaves it at "dev", which the tray shows as-is without ever claiming
+// to be behind the latest release.
+var version = "dev"
 
 type app struct {
 	mu    sync.Mutex // guards cfg / pendingLogin / busy
@@ -48,13 +56,39 @@ type app struct {
 	pendingLogin bool
 	busy         bool // an operation is in progress (drives the status row)
 
+	// updateChecking marks a GitHub release check in flight, so the Updates
+	// tab's button can show "Checking…" and a second click (or the daily
+	// background loop firing mid-check) is a no-op instead of overlapping
+	// requests racing to write a.cfg.
+	updateChecking bool
+
 	fyneApp     fyne.App
 	desk        desktop.App
 	menu        *fyne.Menu
 	settingsWin fyne.Window
+	// settingsTabIndex is the Settings window's currently selected tab.
+	// settingsContent() rebuilds the whole tab widget on every refresh (a
+	// stats poll, a switch, a toggle), so this is what keeps the window on
+	// the tab the user is looking at instead of snapping back to the first
+	// one each time. UI-thread only, like settingsWin.
+	settingsTabIndex int
 
 	normalIcon fyne.Resource
 	spin       []fyne.Resource // spinner animation frames
+
+	// restIcon is the tray icon to show whenever the spinner is not running:
+	// normalIcon, or (with Show Multiple Profiles on) the composite swatch
+	// strip. Only ever set from buildAndSetMenu, which always runs on the UI
+	// thread, and read by runIconAnim's own stop handler on that same thread.
+	restIcon fyne.Resource
+
+	// animMu guards animCount/animStop. Account operations and background
+	// stats syncs can both want the spinner at once; a refcount keeps a
+	// single ticker running for as long as any of them is active, instead of
+	// racing multiple tickers over SetSystemTrayIcon.
+	animMu    sync.Mutex
+	animCount int
+	animStop  chan struct{}
 
 	usageClient *usage.Client
 
@@ -123,6 +157,7 @@ func (a *app) setup() {
 	initLog(store.Root())
 
 	a.normalIcon = fyne.NewStaticResource("cd-switcher", icon.Data())
+	a.restIcon = a.normalIcon
 	a.spin = spinnerResources()
 	a.fyneApp.SetIcon(a.normalIcon)
 	a.desk.SetSystemTrayIcon(a.normalIcon)
@@ -154,8 +189,12 @@ func (a *app) setup() {
 	}
 
 	a.buildAndSetMenu()
-	go a.firstRunIfNeeded()
+	go func() {
+		a.firstRunAskLoginIfNeeded()
+		a.firstRunIfNeeded()
+	}()
 	go a.startStatsLoop()
+	go a.startUpdateCheckLoop()
 	go a.watchParallelWindows()
 }
 
@@ -171,6 +210,7 @@ func (a *app) buildAndSetMenu() {
 	pending := a.pendingLogin
 	busy := a.busy
 	parallel := a.cfg.IsParallel()
+	showMultiple := a.cfg.ShowMultipleProfiles
 	a.mu.Unlock()
 
 	running := map[string]bool{}
@@ -181,6 +221,8 @@ func (a *app) buildAndSetMenu() {
 			}
 		}
 	}
+
+	a.updateTrayIcon(profiles, active.ID, hasActive, showMultiple)
 
 	status := fyne.NewMenuItem("", nil)
 	status.Disabled = true
@@ -236,6 +278,7 @@ func (a *app) buildAndSetMenu() {
 	items = append(items,
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Settings…", a.openSettings),
+		a.updateMenuItem(),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Quit", func() { a.fyneApp.Quit() }),
 	)
@@ -260,7 +303,7 @@ func (a *app) refresh() {
 func (a *app) openSettings() {
 	if a.settingsWin == nil {
 		w := a.fyneApp.NewWindow("Settings")
-		w.Resize(fyne.NewSize(720, 760))
+		w.Resize(fyne.NewSize(780, 760))
 		// Closing the window must not quit the app (the tray lives on).
 		w.SetCloseIntercept(w.Hide)
 		a.settingsWin = w
@@ -361,6 +404,101 @@ func (a *app) startStatsLoop() {
 	}
 }
 
+// updateCheckInterval is how often the background loop checks GitHub for a
+// new release when Automatic Updates is on.
+const updateCheckInterval = 24 * time.Hour
+
+// startUpdateCheckLoop checks for a new release once at startup (if the last
+// check is more than a day old) and then once a day for as long as the app
+// runs, as long as Automatic Updates stays enabled. It never touches
+// a.ops/opWorker, same reasoning as startStatsLoop: a GitHub request must
+// never be able to stall an account switch or vice versa.
+func (a *app) startUpdateCheckLoop() {
+	a.mu.Lock()
+	due := a.cfg.AutoCheckUpdatesEnabled() && time.Since(a.cfg.LastUpdateCheck) > updateCheckInterval
+	a.mu.Unlock()
+	if due {
+		a.checkForUpdates()
+	}
+	for range time.Tick(updateCheckInterval) {
+		a.mu.Lock()
+		enabled := a.cfg.AutoCheckUpdatesEnabled()
+		a.mu.Unlock()
+		if enabled {
+			a.checkForUpdates()
+		}
+	}
+}
+
+// checkForUpdates fetches the latest GitHub release and caches it in a.cfg,
+// then repaints the tray menu. A second call while one is already in
+// flight (a user click racing the daily timer) is dropped rather than
+// racing two writes to a.cfg.
+func (a *app) checkForUpdates() {
+	a.mu.Lock()
+	if a.updateChecking {
+		a.mu.Unlock()
+		return
+	}
+	a.updateChecking = true
+	a.mu.Unlock()
+	a.refresh()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	rel, err := updatecheck.Latest(ctx)
+	cancel()
+	if err != nil {
+		logf("update check failed: %v", err)
+	}
+
+	a.mu.Lock()
+	a.updateChecking = false
+	a.cfg.LastUpdateCheck = time.Now()
+	if err == nil {
+		a.cfg.LatestVersion = rel.Version
+		a.cfg.LatestVersionURL = rel.URL
+	}
+	saveErr := a.store.Save(a.cfg)
+	a.mu.Unlock()
+	if saveErr != nil {
+		logf("update check: save config: %v", saveErr)
+	}
+	a.refresh()
+}
+
+// updateMenuItem is the tray menu's update row — this is the only UI for
+// checking updates; there is deliberately no Settings tab for it, so it works
+// without opening that window. Three states: a disabled "Checking…" row while
+// a check is running, "Update available: vX" opening the release page once
+// one is found, or a plain "Check for Updates" action otherwise.
+func (a *app) updateMenuItem() *fyne.MenuItem {
+	a.mu.Lock()
+	checking := a.updateChecking
+	latest := a.cfg.LatestVersion
+	latestURL := a.cfg.LatestVersionURL
+	a.mu.Unlock()
+
+	switch {
+	case checking:
+		it := fyne.NewMenuItem("Checking for updates…", nil)
+		it.Disabled = true
+		return it
+	case latest != "" && updatecheck.IsNewer(version, latest):
+		return fyne.NewMenuItem(fmt.Sprintf("Update available: %s", latest), func() {
+			u, err := url.Parse(latestURL)
+			if err != nil {
+				logf("update menu: bad release URL %q: %v", latestURL, err)
+				return
+			}
+			if err := a.fyneApp.OpenURL(u); err != nil {
+				logf("update menu: open release URL: %v", err)
+			}
+		})
+	default:
+		return fyne.NewMenuItem("Check for Updates", func() { go a.checkForUpdates() })
+	}
+}
+
 // refreshStats fetches usage stats for every profile not refreshed within
 // statsMinAge, concurrently, then repaints the menu/settings window once.
 func (a *app) refreshStats() {
@@ -368,7 +506,7 @@ func (a *app) refreshStats() {
 	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	a.mu.Unlock()
 
-	var wg sync.WaitGroup
+	var pending []string
 	for _, p := range profiles {
 		a.statsMu.Lock()
 		entry, ok := a.statsCache[p.ID]
@@ -376,14 +514,28 @@ func (a *app) refreshStats() {
 		if ok && time.Since(entry.fetchedAt) < statsMinAge {
 			continue
 		}
+		pending = append(pending, p.ID)
+	}
+	if len(pending) == 0 {
+		return
+	}
 
+	// Spins the tray icon for as long as any profile is still syncing.
+	start := time.Now()
+	a.beginAnim()
+
+	var wg sync.WaitGroup
+	for _, id := range pending {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			a.refreshOneStat(id)
-		}(p.ID)
+		}(id)
 	}
 	wg.Wait()
+
+	sleepRemaining(start)
+	a.endAnim()
 	a.refresh()
 }
 
@@ -436,6 +588,43 @@ func (a *app) refreshOneStat(id string) {
 		logf("stats: append history failed for %q: %v", id, err)
 	}
 	a.maybeWarn(id, stats)
+	a.maybeAutoSwitch(id, stats)
+}
+
+// maybeAutoSwitch switches away from the active profile once its session
+// usage reaches 100%, picking whichever other profile has the most room left.
+// It only applies to the active profile in switch mode (side-by-side already
+// keeps every account open) and fires once per reset window, the same
+// debounce scheme maybeWarn uses for limit notifications.
+func (a *app) maybeAutoSwitch(id string, stats usage.Stats) {
+	a.mu.Lock()
+	enabled := a.cfg.AutoSwitchOnLimit
+	isActive := id == a.cfg.ActiveProfile
+	parallel := a.cfg.IsParallel()
+	a.mu.Unlock()
+	if !enabled || !isActive || parallel {
+		return
+	}
+
+	if stats.FiveHour.Utilization < 100 {
+		a.forgetAlerts(id, "autoswitch")
+		return
+	}
+
+	key := alertKey{id: id, window: "autoswitch", resetUnix: stats.FiveHour.ResetsAt.Unix()}
+	a.alertMu.Lock()
+	if a.alerted == nil {
+		a.alerted = map[alertKey]struct{}{}
+	}
+	if _, seen := a.alerted[key]; seen {
+		a.alertMu.Unlock()
+		return
+	}
+	a.alerted[key] = struct{}{}
+	a.alertMu.Unlock()
+
+	logf("auto-switch: %q hit 100%% session usage, switching to the most available profile", id)
+	a.runOp(a.doUseFreest)
 }
 
 // historyPath is where a profile's usage-percentage history is persisted,
@@ -527,20 +716,35 @@ func (a *app) opWorker() {
 	}
 }
 
+// minSpinDuration is the shortest time the tray icon spins for, even when the
+// underlying work (a local file copy, a quickly-rejected network call)
+// finishes faster than that. Without this floor, fast operations clear the
+// spinner before a single frame is visible.
+const minSpinDuration = 700 * time.Millisecond
+
 // execOp runs one operation: shows the spinner, runs the work under the lock
 // (panic-contained), then clears the spinner and refreshes the menu.
 func (a *app) execOp(fn func() error) {
 	a.setBusy(true)
-	stopAnim := a.animateIcon()
+	start := time.Now()
+	a.beginAnim()
 
 	err := a.safeRun(fn)
 
-	close(stopAnim)
+	sleepRemaining(start)
+	a.endAnim()
 	a.setBusy(false) // also refreshes the menu (new active profile, etc.)
 
 	if err != nil && !errors.Is(err, zenity.ErrCanceled) {
 		logf("operation failed: %v", err)
 		notifyErr("Operation failed", err)
+	}
+}
+
+// sleepRemaining blocks until minSpinDuration has passed since start.
+func sleepRemaining(start time.Time) {
+	if d := minSpinDuration - time.Since(start); d > 0 {
+		time.Sleep(d)
 	}
 }
 
@@ -565,26 +769,79 @@ func (a *app) setBusy(b bool) {
 	a.refresh()
 }
 
-// animateIcon cycles the tray icon through the spinner frames until the
-// returned channel is closed, giving at-a-glance "working" feedback in the
-// menu bar (Fyne trays show an icon, not a text title).
-func (a *app) animateIcon() chan struct{} {
-	stop := make(chan struct{})
-	go func() {
-		t := time.NewTicker(110 * time.Millisecond)
-		defer t.Stop()
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				fyne.Do(func() { a.desk.SetSystemTrayIcon(a.normalIcon) })
-				return
-			case <-t.C:
-				frame := a.spin[i%len(a.spin)]
-				fyne.Do(func() { a.desk.SetSystemTrayIcon(frame) })
+// beginAnim marks one more reason the tray icon should be spinning —
+// switching accounts, adding/saving one, or a stats sync all call this. The
+// ticker starts on the first caller and keeps running until the matching
+// endAnim calls bring the count back to zero.
+func (a *app) beginAnim() {
+	a.animMu.Lock()
+	defer a.animMu.Unlock()
+	a.animCount++
+	if a.animCount == 1 {
+		a.animStop = make(chan struct{})
+		go a.runIconAnim(a.animStop)
+	}
+}
+
+// endAnim releases one beginAnim call, stopping the ticker once nothing else
+// still needs it.
+func (a *app) endAnim() {
+	a.animMu.Lock()
+	defer a.animMu.Unlock()
+	a.animCount--
+	if a.animCount <= 0 {
+		a.animCount = 0
+		close(a.animStop)
+		a.animStop = nil
+	}
+}
+
+// runIconAnim cycles the tray icon through the spinner frames until stop is
+// closed, giving at-a-glance "working" feedback in the menu bar (Fyne trays
+// show an icon, not a text title).
+func (a *app) runIconAnim(stop chan struct{}) {
+	t := time.NewTicker(110 * time.Millisecond)
+	defer t.Stop()
+	for i := 0; ; i++ {
+		select {
+		case <-stop:
+			fyne.Do(func() { a.desk.SetSystemTrayIcon(a.restIcon) })
+			return
+		case <-t.C:
+			frame := a.spin[i%len(a.spin)]
+			fyne.Do(func() { a.desk.SetSystemTrayIcon(frame) })
+		}
+	}
+}
+
+// updateTrayIcon sets the tray icon for the current profile list: the plain
+// app icon normally, or (when Show Multiple Profiles is on and there is more
+// than one profile) a composite strip with one swatch per profile and a ring
+// around the active one. Skipped while the spin animation owns the icon; its
+// own stop handler picks up a.restIcon once it finishes.
+func (a *app) updateTrayIcon(profiles []profile.Profile, activeID string, hasActive, showMultiple bool) {
+	next := a.normalIcon
+	if showMultiple && len(profiles) > 1 {
+		activeIndex := -1
+		if hasActive {
+			for i, p := range profiles {
+				if p.ID == activeID {
+					activeIndex = i
+					break
+				}
 			}
 		}
-	}()
-	return stop
+		data := icon.MultiProfileIcon(len(profiles), activeIndex)
+		next = fyne.NewStaticResource(fmt.Sprintf("cd-switcher-multi-%d-%d", len(profiles), activeIndex), data)
+	}
+	a.restIcon = next
+
+	a.animMu.Lock()
+	spinning := a.animCount > 0
+	a.animMu.Unlock()
+	if !spinning {
+		a.desk.SetSystemTrayIcon(next)
+	}
 }
 
 // --- operations (run with a.mu held, on the worker goroutine) ---
@@ -790,6 +1047,22 @@ func (a *app) doSetLogin(on bool) error {
 		return err
 	}
 	a.cfg.LaunchAtLogin = on
+	a.cfg.LaunchAtLoginAsked = true
+	return a.store.Save(a.cfg)
+}
+
+func (a *app) doSetShowMultipleProfiles(on bool) error {
+	a.cfg.ShowMultipleProfiles = on
+	return a.store.Save(a.cfg)
+}
+
+func (a *app) doSetAutoSwitch(on bool) error {
+	a.cfg.AutoSwitchOnLimit = on
+	return a.store.Save(a.cfg)
+}
+
+func (a *app) doSetAutoCheckUpdates(on bool) error {
+	a.cfg.AutoCheckUpdates = &on
 	return a.store.Save(a.cfg)
 }
 
@@ -954,6 +1227,34 @@ func (a *app) captureCurrent(defaultLabel string) error {
 	}
 	_ = zenity.Notify(fmt.Sprintf("Captured account: %s", label))
 	return nil
+}
+
+// firstRunAskLoginIfNeeded asks, once, whether to open CD-Switcher
+// automatically at login. The Settings checkbox can change the answer later;
+// this just keeps the app from nagging about it on every later launch.
+func (a *app) firstRunAskLoginIfNeeded() {
+	if !login.Supported() {
+		return
+	}
+	a.mu.Lock()
+	asked := a.cfg.LaunchAtLoginAsked
+	a.mu.Unlock()
+	if asked {
+		return
+	}
+
+	err := zenity.Question(
+		"Open CD-Switcher automatically when you log in?\n\nYou can change this later in Settings.",
+		zenity.Title("CD-Switcher setup"),
+		zenity.OKLabel("Open at login"),
+		zenity.CancelLabel("Not now"),
+	)
+	if err != nil && !errors.Is(err, zenity.ErrCanceled) {
+		notifyErr("Setup failed", err)
+		return
+	}
+	enable := err == nil
+	a.runOp(func() error { return a.doSetLogin(enable) })
 }
 
 // firstRunIfNeeded offers to capture the current account when no profiles exist.

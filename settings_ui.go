@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -17,79 +19,135 @@ import (
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
 
-// settingsContent builds the settings window: a mode switch, then one panel
-// per account with its live plan meters. Reads state under the lock; runs on
-// the UI thread.
+// settingsContent builds the settings window as a left-rail tab system, one
+// tab per settings area. Runs on the UI thread. This is rebuilt from scratch
+// on every refresh() call (a stats poll, a switch, a toggle flip all trigger
+// one), so the previously selected tab is restored from a.settingsTabIndex
+// rather than a fresh fyne.Container defaulting back to the first tab.
+//
+// Update checking lives in the tray menu, not here — see
+// (*app).updateMenuItem in main.go — so it works without opening this window.
 func (a *app) settingsContent() fyne.CanvasObject {
+	general := container.NewTabItemWithIcon("General", theme.SettingsIcon(), a.generalTabContent())
+	profiles := container.NewTabItemWithIcon("Manage Profiles", theme.AccountIcon(), a.manageProfilesTabContent())
+	accounts := container.NewTabItemWithIcon("Accounts", theme.ListIcon(), a.accountsTabContent())
+
+	tabs := container.NewAppTabs(general, profiles, accounts)
+	tabs.SetTabLocation(container.TabLocationLeading)
+	tabs.OnSelected = func(*container.TabItem) { a.settingsTabIndex = tabs.SelectedIndex() }
+	tabs.SelectIndex(a.settingsTabIndex)
+	return tabs
+}
+
+// generalTabContent is the "General" tab: how accounts switch, when to warn
+// about limits, whether CD-Switcher opens at login, and whether it checks for
+// its own updates in the background. The check itself (and the menu item
+// showing the result) lives in the tray menu — see (*app).updateMenuItem in
+// main.go — so it works without opening this window.
+func (a *app) generalTabContent() fyne.CanvasObject {
+	a.mu.Lock()
+	parallel := a.cfg.IsParallel()
+	launchAtLogin := a.cfg.LaunchAtLogin
+	warnAt := a.cfg.WarnPercent()
+	autoCheckUpdates := a.cfg.AutoCheckUpdatesEnabled()
+	a.mu.Unlock()
+
+	title := headingText("General")
+	sub := widget.NewLabel("Account switching, limit alerts, and startup")
+	sub.Importance = widget.LowImportance
+
+	rows := []fyne.CanvasObject{a.modeRow(parallel), a.alertRow(warnAt)}
+	if row := a.loginRow(launchAtLogin); row != nil {
+		rows = append(rows, row)
+	}
+	rows = append(rows, toggleRow(
+		"Automatically check for updates",
+		"Check once a day in the background. Check for Updates in the tray menu runs one on demand.",
+		autoCheckUpdates, true,
+		func(checked bool) { a.runOp(func() error { return a.doSetAutoCheckUpdates(checked) }) },
+	))
+
+	body := vbox(10, vbox(2, title, sub), group(rows...))
+	return container.NewVScroll(container.NewPadded(body))
+}
+
+// manageProfilesTabContent is the "Manage Profiles" tab: the tray-display and
+// auto-switch toggles. The accounts themselves live in their own "Accounts"
+// tab, since that list can get long and scrolls independently.
+func (a *app) manageProfilesTabContent() fyne.CanvasObject {
+	a.mu.Lock()
+	profileCount := len(a.cfg.Profiles)
+	showMultiple := a.cfg.ShowMultipleProfiles
+	autoSwitch := a.cfg.AutoSwitchOnLimit
+	a.mu.Unlock()
+
+	title := headingText("Manage Profiles")
+	sub := widget.NewLabel("Choose how multiple Claude accounts behave")
+	sub.Importance = widget.LowImportance
+
+	display := group(a.multiProfileRow(showMultiple), a.autoSwitchRow(autoSwitch, profileCount > 1))
+
+	body := vbox(10, vbox(2, title, sub), display)
+	return container.NewVScroll(container.NewPadded(body))
+}
+
+// accountsTabContent is the "Accounts" tab: every captured Claude account
+// with its live plan meters, usage history, and the switch/rename/remove
+// actions.
+func (a *app) accountsTabContent() fyne.CanvasObject {
 	a.mu.Lock()
 	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	activeID := a.cfg.ActiveProfile
 	parallel := a.cfg.IsParallel()
-	launchAtLogin := a.cfg.LaunchAtLogin
-	warnAt := a.cfg.WarnPercent()
 	a.mu.Unlock()
 	_, best, hasBest := a.freest(profiles)
 
-	title := widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	sub := widget.NewLabel("Accounts, plan limits, and spend")
+	title := headingText("Accounts")
+	sub := widget.NewLabel("Create and manage multiple Claude accounts")
 	sub.Importance = widget.LowImportance
 	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() { go a.refreshStats() })
 	refreshBtn.Importance = widget.LowImportance
-	header := container.NewBorder(nil, nil, container.NewVBox(title, sub), refreshBtn)
+	header := container.NewBorder(nil, nil, vbox(2, title, sub), refreshBtn)
 
-	topItems := []fyne.CanvasObject{header, a.modeControl(parallel), a.alertControl(warnAt)}
-	if row := a.loginRow(launchAtLogin); row != nil {
-		topItems = append(topItems, row)
-	}
-	topItems = append(topItems, sectionLabel("Accounts"))
-	top := container.NewVBox(topItems...)
-
-	cards := container.NewVBox()
+	var cardObjs []fyne.CanvasObject
 	if len(profiles) == 0 {
-		cards.Add(newPanel(widget.NewLabel("No accounts yet. Use Add account… from the menu.")))
+		cardObjs = append(cardObjs, newPanel(widget.NewLabel("No accounts yet. Use Add account… from the menu.")))
 	}
 	for i, p := range profiles {
-		if i > 0 {
-			cards.Add(vGap(8))
-		}
-		cards.Add(a.accountCard(p, p.ID == activeID, parallel, hasBest && p.ID == best.ID, i == 0, i == len(profiles)-1))
+		cardObjs = append(cardObjs, a.accountCard(p, p.ID == activeID, parallel, hasBest && p.ID == best.ID, i == 0, i == len(profiles)-1))
 	}
+	cards := vbox(8, cardObjs...)
 
 	note := widget.NewLabel("Session and weekly figures are how full each limit is. Extra usage is spend past the plan. Token counts appear when Claude's usage response includes them.")
 	note.Wrapping = fyne.TextWrapWord
 	note.Importance = widget.LowImportance
 
-	return container.NewPadded(container.NewBorder(
-		top,
-		note, nil, nil,
-		container.NewVScroll(cards),
-	))
+	body := vbox(10, header, cards, note)
+	return container.NewVScroll(container.NewPadded(body))
 }
 
-func (a *app) modeControl(parallel bool) fyne.CanvasObject {
-	one := widget.NewButton("Switch accounts", func() {
-		if parallel {
-			a.runOp(func() error { return a.doSetMode(profile.ModeSwitch) })
-		}
-	})
-	side := widget.NewButton("Side by side", func() {
-		if !parallel {
-			a.runOp(func() error { return a.doSetMode(profile.ModeParallel) })
-		}
-	})
+// modeRow is one row of the General group: a compact segmented control
+// choosing between switch-accounts and side-by-side, plus a usage hint.
+func (a *app) modeRow(parallel bool) fyne.CanvasObject {
+	selected := 0
 	if parallel {
-		side.Importance = widget.HighImportance
-		one.Importance = widget.LowImportance
-	} else {
-		one.Importance = widget.HighImportance
-		side.Importance = widget.LowImportance
+		selected = 1
 	}
+	seg := newSegmentedControl([]string{"Switch accounts", "Side by side"}, selected, func(i int) {
+		mode := profile.ModeSwitch
+		if i == 1 {
+			mode = profile.ModeParallel
+		}
+		a.runOp(func() error { return a.doSetMode(mode) })
+	})
 	hint := widget.NewLabel("Control-Option-S opens the next account.")
 	hint.Importance = widget.LowImportance
-	return newPanel(container.NewVBox(container.NewGridWithColumns(2, one, side), hint))
+	return vbox(6, seg, hint)
 }
 
-func (a *app) alertControl(current int) fyne.CanvasObject {
+// alertRow is one row of the General group: the session/weekly limit
+// notification threshold.
+func (a *app) alertRow(current int) fyne.CanvasObject {
 	options := []string{"Off", "70%", "80%", "90%"}
 	selected := "Off"
 	switch current {
@@ -121,30 +179,106 @@ func (a *app) alertControl(current int) fyne.CanvasObject {
 	suppress = false
 	hint := widget.NewLabel("Notify once when a session or weekly limit reaches this.")
 	hint.Importance = widget.LowImportance
-	label := widget.NewLabel("Limit alert")
-	return newPanel(container.NewVBox(container.NewBorder(nil, nil, label, sel), hint))
+	label := widget.NewLabelWithStyle("Limit alert", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	return vbox(6, container.NewBorder(nil, nil, label, sel), hint)
 }
 
+// loginRow is the General group's launch-at-login toggle. Returns nil on a
+// platform where login.Supported() is false, so the caller can drop it from
+// the group entirely instead of showing a dead control.
 func (a *app) loginRow(on bool) fyne.CanvasObject {
 	if !login.Supported() {
 		return nil
 	}
-	var suppress bool
-	chk := widget.NewCheck("Open CD-Switcher at login", func(checked bool) {
-		if suppress {
-			return
-		}
+	return toggleRow("Open CD-Switcher at login", "", on, true, func(checked bool) {
 		a.runOp(func() error { return a.doSetLogin(checked) })
 	})
-	suppress = true
-	chk.SetChecked(on)
-	suppress = false
-	return newPanel(chk)
 }
 
-func sectionLabel(text string) fyne.CanvasObject {
-	l := widget.NewLabelWithStyle(text, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	return l
+// multiProfileRow is the Manage Profiles group's first row: a toggle that
+// swaps the single tray icon for a compact swatch strip, one per profile,
+// with the active one ringed.
+func (a *app) multiProfileRow(on bool) fyne.CanvasObject {
+	return toggleRow(
+		"Show Multiple Profiles",
+		"Display selected profiles as compact icons side-by-side in the menu bar, instead of a single app icon.",
+		on, true,
+		func(checked bool) { a.runOp(func() error { return a.doSetShowMultipleProfiles(checked) }) },
+	)
+}
+
+// autoSwitchRow is the Manage Profiles group's second row: a toggle that,
+// once the active profile hits 100% session usage, switches to whichever
+// other profile has the most room left. Disabled with fewer than two
+// profiles, since there is nothing to switch to yet.
+func (a *app) autoSwitchRow(on, enabled bool) fyne.CanvasObject {
+	return toggleRow(
+		"Enable Auto-Switch",
+		"When the active profile hits 100% session usage, automatically switch to the next available profile.",
+		on, enabled,
+		func(checked bool) { a.runOp(func() error { return a.doSetAutoSwitch(checked) }) },
+	)
+}
+
+// toggleRow is one titled pill-switch preference, with an optional
+// description line beneath it — plain content meant to sit inside a group(),
+// not its own card.
+func toggleRow(title, desc string, on, enabled bool, changed func(bool)) fyne.CanvasObject {
+	sw := newToggleSwitch(on, changed)
+	sw.SetDisabled(!enabled)
+
+	label := widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	row := container.NewBorder(nil, nil, label, container.NewCenter(sw))
+
+	if desc == "" {
+		return row
+	}
+	d := widget.NewLabel(desc)
+	d.Wrapping = fyne.TextWrapWord
+	d.Importance = widget.LowImportance
+	return vbox(4, row, d)
+}
+
+// group wraps a set of rows in a single card, one hairline divider between
+// each — the grouped-list look (one logical section, one outline) instead of
+// a separate floating card per row.
+func group(rows ...fyne.CanvasObject) fyne.CanvasObject {
+	items := make([]fyne.CanvasObject, 0, len(rows)*2)
+	for _, r := range rows {
+		if r == nil {
+			continue
+		}
+		if len(items) > 0 {
+			items = append(items, divider())
+		}
+		items = append(items, rowPadding(r))
+	}
+	// Zero gap: rowPadding already supplies the space around each row, so an
+	// extra inter-child gap here would double it up.
+	return newPanel(vbox(0, items...))
+}
+
+// rowPadding adds vertical breathing room around one row inside a group,
+// without the horizontal padding newPanel's outer padding already supplies.
+func rowPadding(inner fyne.CanvasObject) fyne.CanvasObject {
+	return container.New(layout.NewCustomPaddedLayout(6, 6, 0, 0), inner)
+}
+
+// divider is a hairline rule between rows inside the same group card.
+func divider() fyne.CanvasObject {
+	r := canvas.NewRectangle(uitheme.CurrentGridLine())
+	r.SetMinSize(fyne.NewSize(0, 1))
+	return r
+}
+
+// sectionCaption is a small, muted, uppercase group label ("GENERAL",
+// "ACCOUNTS") in the style of a native grouped-settings list, replacing a
+// large bold heading that competed visually with the cards themselves.
+func sectionCaption(text string) fyne.CanvasObject {
+	t := canvas.NewText(strings.ToUpper(text), uitheme.CurrentMuted())
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	t.TextSize = 11
+	return container.New(layout.NewCustomPaddedLayout(2, 2, 0, 0), t)
 }
 
 // accountCard is one account: name and plan, limit meters, spend, the recent
@@ -166,12 +300,12 @@ func (a *app) accountCard(p profile.Profile, active, parallel, mostRoom, first, 
 	name := widget.NewLabelWithStyle(p.Label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	meta := container.NewHBox()
 	if parallel && windowOpen {
-		meta.Add(accentLabel("Open"))
+		meta.Add(badge("Open"))
 	} else if !parallel && active {
-		meta.Add(accentLabel("Active"))
+		meta.Add(badge("Active"))
 	}
 	if mostRoom {
-		meta.Add(accentLabel("Most room"))
+		meta.Add(badge("Most room"))
 	}
 
 	a.statsMu.Lock()
@@ -233,19 +367,13 @@ func (a *app) accountCard(p profile.Profile, active, parallel, mostRoom, first, 
 	if len(history) >= 2 {
 		chartLabel := widget.NewLabel("Session, last day")
 		chartLabel.Importance = widget.LowImportance
-		oldest := widget.NewLabel(history[0].Time.Local().Format("3:04pm"))
-		oldest.Importance = widget.LowImportance
-		newest := widget.NewLabel("now")
-		newest.Importance = widget.LowImportance
-		body = append(body,
-			chartLabel,
-			newSparkline(history),
-			container.NewBorder(nil, nil, oldest, newest),
-		)
+		// The chart carries its own axis labels, so the time range is drawn
+		// inside the plot frame rather than as a row beneath it.
+		body = append(body, chartLabel, newSparkline(history))
 	}
 
 	body = append(body, a.accountActions(id, active, parallel, windowOpen, first, last))
-	return newPanel(container.NewVBox(body...))
+	return newPanel(vbox(6, body...))
 }
 
 func (a *app) accountActions(id string, active, parallel, windowOpen, first, last bool) fyne.CanvasObject {
@@ -331,24 +459,11 @@ func usageMeter(m usage.Meter) fyne.CanvasObject {
 	if detail == "" {
 		sub.Hide()
 	}
-	return container.NewVBox(
+	return vbox(4,
 		container.NewBorder(nil, nil, name, right),
 		newThinMeter(float32(frac)),
 		sub,
 	)
-}
-
-func accentLabel(text string) fyne.CanvasObject {
-	l := widget.NewLabel(text)
-	l.Importance = widget.HighImportance
-	l.TextStyle = fyne.TextStyle{Bold: true}
-	return l
-}
-
-func vGap(h float32) fyne.CanvasObject {
-	r := canvas.NewRectangle(theme.Color(theme.ColorNameBackground))
-	r.SetMinSize(fyne.NewSize(0, h))
-	return r
 }
 
 // roundedPanel is a padded surface with a hairline border. Colors are read

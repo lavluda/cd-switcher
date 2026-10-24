@@ -95,13 +95,14 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CGO_ENABLED: "1"
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
           CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" GOARCH=arm64 \
-            go build -trimpath -ldflags "-s -w" -o cd-switcher-arm64 .
+            go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o cd-switcher-arm64 .
           CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" GOARCH=amd64 \
-            go build -trimpath -ldflags "-s -w" -o cd-switcher-amd64 .
+            go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o cd-switcher-amd64 .
           lipo -create -output cd-switcher cd-switcher-arm64 cd-switcher-amd64
           lipo -info cd-switcher
 
@@ -184,7 +185,10 @@ jobs:
         env:
           CGO_ENABLED: "1"
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags "-s -w" -o "cd-switcher-${{ matrix.name }}${{ matrix.ext }}" .
+        # The version goes in via a GitHub Actions expression, not a shell
+        # variable: this step runs under bash on Linux but pwsh on Windows,
+        # and "$TAG" only expands in one of those.
+        run: go build -trimpath -ldflags "-s -w -X main.version=${{ github.event.inputs.tag || github.ref_name }}" -o "cd-switcher-${{ matrix.name }}${{ matrix.ext }}" .
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
