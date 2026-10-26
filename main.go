@@ -21,6 +21,7 @@ import (
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"github.com/ncruces/zenity"
 
 	"github.com/lavluda/cd-switcher/internal/claude"
@@ -241,11 +242,12 @@ func (a *app) buildAndSetMenu() {
 
 	items := []*fyne.MenuItem{status, fyne.NewMenuItemSeparator()}
 
-	for _, p := range profiles {
+	for i, p := range profiles {
 		id := p.ID
 		it := fyne.NewMenuItem(p.Label, func() {
 			a.runOp(func() error { return a.doSwitch(id) })
 		})
+		it.Icon = fyne.NewStaticResource(fmt.Sprintf("swatch%d.png", i), icon.Swatch(i))
 		if parallel {
 			dir, _ := filepath.Abs(a.store.ProfileDir(id))
 			it.Checked = running[filepath.Clean(dir)]
@@ -254,11 +256,7 @@ func (a *app) buildAndSetMenu() {
 		}
 
 		items = append(items, it)
-		for _, line := range a.statLinesFor(id) {
-			statLine := fyne.NewMenuItem(line, nil)
-			statLine.Disabled = true
-			items = append(items, statLine)
-		}
+		items = append(items, a.statLinesFor(id)...)
 	}
 	if item, ok := a.freestMenuItem(profiles, active.ID, hasActive, parallel); ok {
 		items = append(items, item)
@@ -270,17 +268,25 @@ func (a *app) buildAndSetMenu() {
 			a.runOp(a.doSaveAccount)
 		}))
 	} else {
-		items = append(items, fyne.NewMenuItem("Add account…", func() {
+		add := fyne.NewMenuItem("Add account…", func() {
 			a.runOp(a.doAddAccount)
-		}))
+		})
+		add.Icon = theme.ContentAddIcon()
+		items = append(items, add)
 	}
 
+	settings := fyne.NewMenuItem("Settings…", a.openSettings)
+	settings.Icon = theme.SettingsIcon()
+	update := a.updateMenuItem()
+	update.Icon = theme.DownloadIcon()
+	quit := fyne.NewMenuItem("Quit", func() { a.fyneApp.Quit() })
+	quit.Icon = theme.LogoutIcon()
 	items = append(items,
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Settings…", a.openSettings),
-		a.updateMenuItem(),
+		settings,
+		update,
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Quit", func() { a.fyneApp.Quit() }),
+		quit,
 	)
 
 	a.menu = fyne.NewMenu("CD-Switcher", items...)
@@ -660,41 +666,56 @@ func (a *app) setStatEntry(id string, next statEntry) {
 	a.statsCache[id] = next
 }
 
-// statLinesFor renders a profile's cached usage stats for the tray dropdown,
-// one line per limit window (5-hour, then weekly). A single "—" line until the
+// statLinesFor renders a profile's cached usage stats for the tray dropdown.
+// The session and weekly rows carry a coloured ring gauge and stay enabled
+// (clicking opens Settings) so macOS doesn't grey the colour out; the plan,
+// token and spend rows are dimmed secondary text. A single "—" row until the
 // first successful fetch.
-func (a *app) statLinesFor(id string) []string {
+func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 	a.statsMu.Lock()
 	e, ok := a.statsCache[id]
 	a.statsMu.Unlock()
 	if !ok || e.fetchedAt.IsZero() {
-		return []string{"usage: —"}
+		return []*fyne.MenuItem{dimItem("usage: —")}
 	}
 	stale := ""
 	if e.err != nil {
 		stale = " (stale)"
 	}
-	fh, sd := e.stats.FiveHour, e.stats.SevenDay
-	lines := []string{
-		fmt.Sprintf("%.0f%% of session · resets %s%s",
-			fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"), stale),
-		fmt.Sprintf("%.0f%% of weekly limit · resets %s%s",
-			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2"), stale),
-	}
-	if short := e.stats.Tokens.Short(); short != "" {
-		lines = append(lines, "tokens "+short+stale)
-	}
+	var items []*fyne.MenuItem
 	if e.plan != "" {
 		plan := e.plan
 		if e.tier != "" {
 			plan += " · " + e.tier
 		}
-		lines = append([]string{plan}, lines...)
+		items = append(items, dimItem(plan))
+	}
+	fh, sd := e.stats.FiveHour, e.stats.SevenDay
+	items = append(items,
+		gaugeItem(fmt.Sprintf("Session %.0f%% · resets %s%s",
+			fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"), stale), fh.Utilization, a.openSettings),
+		gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s%s",
+			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2"), stale), sd.Utilization, a.openSettings),
+	)
+	if short := e.stats.Tokens.Short(); short != "" {
+		items = append(items, dimItem("tokens "+short+stale))
 	}
 	if spend := e.stats.ExtraUsage.SpendLabel(); spend != "" {
-		lines = append(lines, spend+stale)
+		items = append(items, dimItem(spend+stale))
 	}
-	return lines
+	return items
+}
+
+func dimItem(label string) *fyne.MenuItem {
+	it := fyne.NewMenuItem(label, nil)
+	it.Disabled = true
+	return it
+}
+
+func gaugeItem(label string, pct float64, action func()) *fyne.MenuItem {
+	it := fyne.NewMenuItem(label, action)
+	it.Icon = fyne.NewStaticResource(fmt.Sprintf("gauge%.0f.png", pct), icon.Gauge(pct))
+	return it
 }
 
 // runOp hands an account operation to the worker and returns immediately so the
@@ -1033,7 +1054,27 @@ func (a *app) doUseFreest() error {
 
 func (a *app) doSetWarn(percent int) error {
 	a.cfg.WarnAt = &percent
-	return a.store.Save(a.cfg)
+	if err := a.store.Save(a.cfg); err != nil {
+		return err
+	}
+	// Check cached usage against the new threshold now rather than at the next
+	// poll. In a goroutine because maybeWarn takes a.mu, which runOp holds.
+	go a.recheckWarnings()
+	return nil
+}
+
+func (a *app) recheckWarnings() {
+	a.statsMu.Lock()
+	cached := make(map[string]usage.Stats, len(a.statsCache))
+	for id, e := range a.statsCache {
+		if !e.fetchedAt.IsZero() {
+			cached[id] = e.stats
+		}
+	}
+	a.statsMu.Unlock()
+	for id, stats := range cached {
+		a.maybeWarn(id, stats)
+	}
 }
 
 func (a *app) doSetLogin(on bool) error {

@@ -164,3 +164,57 @@ func inRoundedRect(x, y, w, h, r int) bool {
 }
 
 func sq(v int) int { return v * v }
+
+// Swatch renders profile i's palette colour as a rounded square, matching its
+// swatch in MultiProfileIcon so menu rows and the tray strip line up.
+func Swatch(i int) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	c := swatchPalette[i%len(swatchPalette)]
+	const inset, r = 6, 5
+	w := size - 2*inset
+	for y := inset; y < size-inset; y++ {
+		for x := inset; x < size-inset; x++ {
+			if inRoundedRect(x-inset, y-inset, w, w, r) {
+				img.Set(x, y, c)
+			}
+		}
+	}
+	// Grey outline keeps the near-black swatch visible on a dark menu.
+	drawRing(img, inset, inset, w, w, r, 2, color.RGBA{0x8E, 0x8E, 0x93, 0xFF})
+	return encode(img)
+}
+
+// Gauge renders a ring filled clockwise from 12 o'clock to pct (0–100):
+// green under 50, amber under 80, red from 80 up.
+func Gauge(pct float64) []byte {
+	fill := color.RGBA{0x34, 0xC7, 0x59, 0xFF}
+	switch {
+	case pct >= 80:
+		fill = color.RGBA{0xFF, 0x45, 0x3A, 0xFF}
+	case pct >= 50:
+		fill = color.RGBA{0xFF, 0x9F, 0x0A, 0xFF}
+	}
+	track := color.RGBA{0x8E, 0x8E, 0x93, 0x66}
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	const outer, inner = 14.0, 9.5
+	mid := float64(size) / 2
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			dx, dy := float64(x)+0.5-mid, float64(y)+0.5-mid
+			d := math.Hypot(dx, dy)
+			if d > outer || d < inner {
+				continue
+			}
+			ang := math.Atan2(dx, -dy) // 0 at 12 o'clock, clockwise
+			if ang < 0 {
+				ang += 2 * math.Pi
+			}
+			if ang/(2*math.Pi)*100 < pct {
+				img.Set(x, y, fill)
+			} else {
+				img.Set(x, y, track)
+			}
+		}
+	}
+	return encode(img)
+}

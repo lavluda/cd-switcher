@@ -55,3 +55,24 @@ func TestMultiProfileIconDistinctSwatches(t *testing.T) {
 		t.Errorf("adjacent swatches should differ: both are %v", left)
 	}
 }
+
+func TestGaugeColours(t *testing.T) {
+	// Pixel just right of 12 o'clock on the ring is filled for any pct > ~1.
+	at := func(pct float64) (r, g uint32) {
+		img, err := png.Decode(bytes.NewReader(Gauge(pct)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, g, _, _ = img.At(size/2, 4).RGBA()
+		return r >> 8, g >> 8
+	}
+	if r, g := at(20); g != 0xC7 || r != 0x34 {
+		t.Errorf("20%%: got r=%x g=%x, want green", r, g)
+	}
+	if r, g := at(60); r != 0xFF || g != 0x9F {
+		t.Errorf("60%%: got r=%x g=%x, want amber", r, g)
+	}
+	if r, g := at(85); r != 0xFF || g != 0x45 {
+		t.Errorf("85%%: got r=%x g=%x, want red", r, g)
+	}
+}
