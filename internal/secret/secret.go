@@ -8,6 +8,7 @@ package secret
 
 import (
 	"errors"
+	"runtime"
 	"time"
 )
 
@@ -47,6 +48,11 @@ type Credential struct {
 func UpdateStoredToken(snapshotDir string, cred Credential) error {
 	return updateStoredToken(snapshotDir, cred)
 }
+
+// CanStoreRefreshed reports whether UpdateStoredToken works on this platform.
+// Where it does not, callers must not refresh at all: the server may rotate
+// the refresh token, and the one left in the snapshot would then be dead.
+func CanStoreRefreshed() bool { return runtime.GOOS != "windows" }
 
 // SessionCredential decrypts and returns the OAuth bearer token stored in the
 // profile snapshot at snapshotDir (a profile.Store.ProfileDir(id) result).

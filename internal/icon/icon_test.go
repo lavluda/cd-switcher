@@ -76,3 +76,30 @@ func TestGaugeColours(t *testing.T) {
 		t.Errorf("85%%: got r=%x g=%x, want red", r, g)
 	}
 }
+
+func TestTrayGaugeKeepsIconSizeAndDrawsRing(t *testing.T) {
+	img, err := png.Decode(bytes.NewReader(TrayGauge(60)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := img.Bounds(); b.Dx() != size || b.Dy() != size {
+		t.Fatalf("size = %v, want %dx%d", b, size, size)
+	}
+	// Top of the ring (12 o'clock) is filled: amber at 60%.
+	r, g, _, _ := img.At(22, 22-7).RGBA()
+	if r>>8 != 0xFF || g>>8 != 0x9F {
+		t.Errorf("ring top = r%x g%x, want amber", r>>8, g>>8)
+	}
+}
+
+func TestMultiProfileIconColorsUsesGivenColours(t *testing.T) {
+	img, err := png.Decode(bytes.NewReader(MultiProfileIconColors([]int{2}, -1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, g, b, _ := img.At(size/2, size/2).RGBA()
+	want := swatchPalette[2]
+	if uint8(r>>8) != want.R || uint8(g>>8) != want.G || uint8(b>>8) != want.B {
+		t.Errorf("centre = %x %x %x, want %v", r>>8, g>>8, b>>8, want)
+	}
+}

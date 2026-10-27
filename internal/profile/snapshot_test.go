@@ -70,6 +70,28 @@ func TestCaptureSkipsCacheAndCopiesNested(t *testing.T) {
 	}
 }
 
+func TestCaptureKeepsOldSnapshotWhenCopyFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read mode-0 files")
+	}
+	dir := t.TempDir()
+	live, snap := filepath.Join(dir, "live"), filepath.Join(dir, "snap")
+	writeFile(t, filepath.Join(snap, "config.json"), "old")
+	writeFile(t, filepath.Join(live, "config.json"), "new")
+	if err := os.Chmod(filepath.Join(live, "config.json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := Capture(live, snap); err == nil {
+		t.Fatal("expected copy of an unreadable file to fail")
+	}
+	if got := readFile(t, filepath.Join(snap, "config.json")); got != "old" {
+		t.Fatalf("old snapshot lost: got %q", got)
+	}
+	if exists(snap + ".tmp") {
+		t.Fatal("temp dir left behind")
+	}
+}
+
 func TestRestoreReplacesIdentityKeepsCache(t *testing.T) {
 	// Snapshot of account B.
 	snapB := filepath.Join(t.TempDir(), "B")

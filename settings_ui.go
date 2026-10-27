@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -13,6 +15,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/lavluda/cd-switcher/internal/claude"
+	"github.com/lavluda/cd-switcher/internal/clicreds"
+	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/login"
 	"github.com/lavluda/cd-switcher/internal/profile"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
@@ -79,13 +83,24 @@ func (a *app) manageProfilesTabContent() fyne.CanvasObject {
 	profileCount := len(a.cfg.Profiles)
 	showMultiple := a.cfg.ShowMultipleProfiles
 	autoSwitch := a.cfg.AutoSwitchOnLimit
+	autoSwitchAt := a.cfg.AutoSwitchPercent()
+	switchCLI := a.cfg.SwitchCLI
 	a.mu.Unlock()
 
 	title := headingText("Manage Profiles")
 	sub := widget.NewLabel("Choose how multiple Claude accounts behave")
 	sub.Importance = widget.LowImportance
 
-	display := group(a.multiProfileRow(showMultiple), a.autoSwitchRow(autoSwitch, profileCount > 1))
+	rows := []fyne.CanvasObject{a.multiProfileRow(showMultiple), a.autoSwitchRow(autoSwitch, autoSwitchAt, profileCount > 1)}
+	if clicreds.Supported() {
+		rows = append(rows, toggleRow(
+			"Switch Claude Code login too",
+			"Each account remembers its own Claude Code (CLI) login and restores it when you switch. An account you haven't signed in to in the CLI starts signed out.",
+			switchCLI, true,
+			func(checked bool) { a.runOp(func() error { return a.doSetSwitchCLI(checked) }) },
+		))
+	}
+	display := group(rows...)
 
 	body := vbox(10, vbox(2, title, sub), display)
 	return container.NewVScroll(container.NewPadded(body))
@@ -114,7 +129,7 @@ func (a *app) accountsTabContent() fyne.CanvasObject {
 		cardObjs = append(cardObjs, newPanel(widget.NewLabel("No accounts yet. Use Add account… from the menu.")))
 	}
 	for i, p := range profiles {
-		cardObjs = append(cardObjs, a.accountCard(p, p.ID == activeID, parallel, hasBest && p.ID == best.ID, i == 0, i == len(profiles)-1))
+		cardObjs = append(cardObjs, a.accountCard(p, p.ColorIndex(i), p.ID == activeID, parallel, hasBest && p.ID == best.ID, i == 0, i == len(profiles)-1))
 	}
 	cards := vbox(8, cardObjs...)
 
@@ -140,7 +155,8 @@ func (a *app) modeRow(parallel bool) fyne.CanvasObject {
 		}
 		a.runOp(func() error { return a.doSetMode(mode) })
 	})
-	hint := widget.NewLabel("Control-Option-S opens the next account.")
+	hint := widget.NewLabel("Control-Option-S opens the next account. Control-Option-1 to 9 opens that account.")
+	hint.Wrapping = fyne.TextWrapWord
 	hint.Importance = widget.LowImportance
 	return vbox(6, seg, hint)
 }
@@ -211,13 +227,29 @@ func (a *app) multiProfileRow(on bool) fyne.CanvasObject {
 // once the active profile hits 100% session usage, switches to whichever
 // other profile has the most room left. Disabled with fewer than two
 // profiles, since there is nothing to switch to yet.
-func (a *app) autoSwitchRow(on, enabled bool) fyne.CanvasObject {
-	return toggleRow(
+func (a *app) autoSwitchRow(on bool, at int, enabled bool) fyne.CanvasObject {
+	toggle := toggleRow(
 		"Enable Auto-Switch",
-		"When the active profile hits 100% session usage, automatically switch to the next available profile.",
+		"When the active profile's session usage reaches this, automatically switch to the available profile with the most room.",
 		on, enabled,
 		func(checked bool) { a.runOp(func() error { return a.doSetAutoSwitch(checked) }) },
 	)
+	var suppress bool
+	sel := widget.NewSelect([]string{"100%", "95%", "90%", "80%"}, func(value string) {
+		if suppress {
+			return
+		}
+		n, _ := strconv.Atoi(strings.TrimSuffix(value, "%"))
+		a.runOp(func() error { return a.doSetAutoSwitchAt(n) })
+	})
+	suppress = true
+	sel.SetSelected(fmt.Sprintf("%d%%", at))
+	suppress = false
+	if !enabled {
+		sel.Disable()
+	}
+	label := widget.NewLabel("Switch at")
+	return vbox(6, toggle, container.NewBorder(nil, nil, label, sel))
 }
 
 // toggleRow is one titled pill-switch preference, with an optional
@@ -283,7 +315,7 @@ func sectionCaption(text string) fyne.CanvasObject {
 
 // accountCard is one account: name and plan, limit meters, spend, the recent
 // session chart, and the account actions.
-func (a *app) accountCard(p profile.Profile, active, parallel, mostRoom, first, last bool) fyne.CanvasObject {
+func (a *app) accountCard(p profile.Profile, colorIdx int, active, parallel, mostRoom, first, last bool) fyne.CanvasObject {
 	id := p.ID
 	windowOpen := false
 	if parallel {
@@ -372,11 +404,19 @@ func (a *app) accountCard(p profile.Profile, active, parallel, mostRoom, first, 
 		body = append(body, chartLabel, newSparkline(history))
 	}
 
-	body = append(body, a.accountActions(id, active, parallel, windowOpen, first, last))
+	if d, err := usage.LoadDaily(a.store.DailyPath(id)); err == nil {
+		if sum, days := d.Summary(time.Now(), 7); days > 0 {
+			week := widget.NewLabel(fmt.Sprintf("Last 7 days · peak %.0f%% session, %.0f%% weekly · limit hit %d×", sum.PeakSession, sum.PeakWeek, sum.Hits))
+			week.Importance = widget.LowImportance
+			body = append(body, week)
+		}
+	}
+
+	body = append(body, a.accountActions(id, colorIdx, active, parallel, windowOpen, first, last))
 	return newPanel(vbox(6, body...))
 }
 
-func (a *app) accountActions(id string, active, parallel, windowOpen, first, last bool) fyne.CanvasObject {
+func (a *app) accountActions(id string, colorIdx int, active, parallel, windowOpen, first, last bool) fyne.CanvasObject {
 	var primary *widget.Button
 	if parallel {
 		if windowOpen {
@@ -414,6 +454,10 @@ func (a *app) accountActions(id string, active, parallel, windowOpen, first, las
 	if last {
 		downBtn.Disable()
 	}
+	colorBtn := widget.NewButtonWithIcon("", fyne.NewStaticResource(fmt.Sprintf("swatch%d.png", colorIdx), icon.Swatch(colorIdx)), func() {
+		a.runOp(func() error { return a.doCycleColor(id) })
+	})
+	colorBtn.Importance = widget.LowImportance
 	renameBtn := widget.NewButtonWithIcon("", theme.DocumentCreateIcon(), func() {
 		a.runOp(func() error { return a.doRename(id) })
 	})
@@ -423,7 +467,7 @@ func (a *app) accountActions(id string, active, parallel, windowOpen, first, las
 	})
 	removeBtn.Importance = widget.LowImportance
 
-	return container.NewBorder(nil, nil, container.NewHBox(upBtn, downBtn, renameBtn, removeBtn), primary)
+	return container.NewBorder(nil, nil, container.NewHBox(upBtn, downBtn, colorBtn, renameBtn, removeBtn), primary)
 }
 
 func usageMeter(m usage.Meter) fyne.CanvasObject {

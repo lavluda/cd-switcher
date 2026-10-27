@@ -1,0 +1,24 @@
+name: CI
+
+# Vets and tests every push and pull request. macOS runners build Fyne's cgo
+# code with no extra packages, and the Keychain, codesign and hdiutil tests
+# can only run there.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - run: go vet ./...
+      - run: go test ./...

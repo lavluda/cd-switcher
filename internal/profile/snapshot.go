@@ -35,13 +35,23 @@ var denylist = map[string]bool{
 // skipped. The destination is built fresh so entries deleted in the live dir do
 // not linger in the snapshot.
 func Capture(liveDir, snapshotDir string) error {
+	// Copy into a sibling first so a failed copy (disk full, unreadable file)
+	// leaves the previous snapshot in place.
+	tmp := snapshotDir + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("clear snapshot: %w", err)
+	}
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return err
+	}
+	if err := copyTree(liveDir, tmp); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
 	if err := os.RemoveAll(snapshotDir); err != nil {
 		return fmt.Errorf("clear snapshot: %w", err)
 	}
-	if err := os.MkdirAll(snapshotDir, 0o700); err != nil {
-		return err
-	}
-	return copyTree(liveDir, snapshotDir)
+	return os.Rename(tmp, snapshotDir)
 }
 
 // Restore copies a profile snapshot over the live Claude data dir. Live cache

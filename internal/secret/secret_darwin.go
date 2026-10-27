@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -23,18 +24,32 @@ var keychainSecret = readKeychainSecret
 // a stats-refresh goroutine forever.
 const keychainTimeout = 30 * time.Second
 
+// keychainCache holds the secret after the first successful read. The key
+// never changes while Claude is installed, and every profile's stats refresh
+// used to spawn its own `security` call and its own permission prompt.
+var keychainCache struct {
+	sync.Mutex
+	secret []byte
+}
+
 // readKeychainSecret reads the per-app Safe Storage secret Claude Desktop
-// registers in the login Keychain. The first call may trigger a one-time
-// macOS permission prompt.
+// registers in the login Keychain, once per process. The first call may
+// trigger a one-time macOS permission prompt. Callers get a copy they may
+// zero.
 func readKeychainSecret() ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), keychainTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password",
-		"-w", "-s", "Claude Safe Storage", "-a", "Claude Key").Output()
-	if err != nil {
-		return nil, fmt.Errorf("secret: read Keychain secret: %w", err)
+	keychainCache.Lock()
+	defer keychainCache.Unlock()
+	if keychainCache.secret == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), keychainTimeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password",
+			"-w", "-s", "Claude Safe Storage", "-a", "Claude Key").Output()
+		if err != nil {
+			return nil, fmt.Errorf("secret: read Keychain secret: %w", err)
+		}
+		keychainCache.secret = bytes.TrimRight(out, "\n")
 	}
-	return bytes.TrimRight(out, "\n"), nil
+	return append([]byte(nil), keychainCache.secret...), nil
 }
 
 func sessionCredential(snapshotDir string) (Credential, error) {

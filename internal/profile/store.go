@@ -19,6 +19,17 @@ type Profile struct {
 	ID        string    `json:"id"`
 	Label     string    `json:"label"`
 	CreatedAt time.Time `json:"createdAt"`
+	// Color is a swatch palette index plus one; 0 means "by position".
+	Color int `json:"color,omitempty"`
+}
+
+// ColorIndex is the palette index for this profile, which sits at position pos
+// in the list.
+func (p Profile) ColorIndex(pos int) int {
+	if p.Color > 0 {
+		return p.Color - 1
+	}
+	return pos
 }
 
 // ModeSwitch is one Claude window; switching accounts quits and relaunches it.
@@ -49,6 +60,15 @@ type Config struct {
 	// moment its session usage reaches 100%, picking whichever other profile
 	// has the most room left.
 	AutoSwitchOnLimit bool `json:"autoSwitchOnLimit,omitempty"`
+	// AutoSwitchAt is the session percent that triggers the auto-switch.
+	// 0 means 100; see AutoSwitchPercent.
+	AutoSwitchAt int `json:"autoSwitchAt,omitempty"`
+	// SwitchCLI makes each account remember its own Claude Code (CLI) login,
+	// restored on every switch. Off by default: it moves credentials around.
+	SwitchCLI bool `json:"switchCLI,omitempty"`
+	// LastSummary is when the weekly usage summary last went out (or, on the
+	// first run, when counting started).
+	LastSummary time.Time `json:"lastSummary,omitempty"`
 	// AutoCheckUpdates controls the daily background check against GitHub's
 	// latest release. Nil (never set) defaults to on — see
 	// AutoCheckUpdatesEnabled.
@@ -91,6 +111,15 @@ func (c *Config) WarnPercent() int {
 	return n
 }
 
+// AutoSwitchPercent is the session percent at which auto-switch fires,
+// defaulting to 100 and never below 50.
+func (c *Config) AutoSwitchPercent() int {
+	if c == nil || c.AutoSwitchAt < 50 || c.AutoSwitchAt > 100 {
+		return 100
+	}
+	return c.AutoSwitchAt
+}
+
 // IsParallel reports whether side-by-side windows are the current mode.
 // An empty mode is the original switch behavior.
 func (c *Config) IsParallel() bool { return c.Mode == ModeParallel }
@@ -130,6 +159,12 @@ func (s *Store) Root() string { return s.root }
 // overwrite it.
 func (s *Store) HistoryPath(id string) string {
 	return filepath.Join(s.root, "history", id+".json")
+}
+
+// DailyPath is where a profile's per-day usage peaks are stored, alongside
+// the history file for the same reason.
+func (s *Store) DailyPath(id string) string {
+	return filepath.Join(s.root, "daily", id+".json")
 }
 
 // ProfileDir returns the snapshot directory for a profile id.
@@ -188,6 +223,17 @@ func (c *Config) Active() (Profile, bool) {
 		return Profile{}, false
 	}
 	return c.Find(c.ActiveProfile)
+}
+
+// SetColor gives a profile a palette index, or -1 to go back to by-position.
+func (c *Config) SetColor(id string, index int) bool {
+	for i := range c.Profiles {
+		if c.Profiles[i].ID == id {
+			c.Profiles[i].Color = index + 1
+			return true
+		}
+	}
+	return false
 }
 
 // Rename changes a profile's display label. The id (and its snapshot directory)

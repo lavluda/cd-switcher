@@ -125,3 +125,19 @@ func TestStoreRemoveSnapshot(t *testing.T) {
 		t.Fatalf("RemoveSnapshot(missing): %v", err)
 	}
 }
+
+func TestColorIndexAndAutoSwitchPercent(t *testing.T) {
+	if got := (Profile{}).ColorIndex(3); got != 3 {
+		t.Errorf("default ColorIndex = %d, want position 3", got)
+	}
+	c := &Config{Profiles: []Profile{{ID: "a"}}}
+	c.SetColor("a", 4)
+	if got := c.Profiles[0].ColorIndex(0); got != 4 {
+		t.Errorf("ColorIndex after SetColor = %d, want 4", got)
+	}
+	for in, want := range map[int]int{0: 100, 30: 100, 90: 90, 150: 100} {
+		if got := (&Config{AutoSwitchAt: in}).AutoSwitchPercent(); got != want {
+			t.Errorf("AutoSwitchPercent(%d) = %d, want %d", in, got, want)
+		}
+	}
+}

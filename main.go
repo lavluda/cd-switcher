@@ -12,10 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -25,12 +28,14 @@ import (
 	"github.com/ncruces/zenity"
 
 	"github.com/lavluda/cd-switcher/internal/claude"
+	"github.com/lavluda/cd-switcher/internal/clicreds"
 	"github.com/lavluda/cd-switcher/internal/dockicon"
 	"github.com/lavluda/cd-switcher/internal/hotkey"
 	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/login"
 	"github.com/lavluda/cd-switcher/internal/profile"
 	"github.com/lavluda/cd-switcher/internal/secret"
+	"github.com/lavluda/cd-switcher/internal/selfupdate"
 	"github.com/lavluda/cd-switcher/internal/switcher"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
 	"github.com/lavluda/cd-switcher/internal/updatecheck"
@@ -92,6 +97,10 @@ type app struct {
 	animStop  chan struct{}
 
 	usageClient *usage.Client
+
+	// updating is set while an in-place update downloads, so a second click
+	// on the menu row doesn't start another.
+	updating atomic.Bool
 
 	// statsMu guards statsCache. It is deliberately separate from mu: usage
 	// fetches make network calls and must never be held up by (or hold up)
@@ -177,6 +186,10 @@ func (a *app) setup() {
 		// Claude not installed yet: keep running but warn.
 		notifyErr("Claude Desktop not found", err)
 	}
+	// No active profile with profiles saved means the app quit between "Add
+	// account" and "Save this account": offer the save again instead of an
+	// "Add account" that would wipe the fresh login.
+	a.pendingLogin = a.cfg.ActiveProfile == "" && len(a.cfg.Profiles) > 0
 
 	a.usageClient = usage.NewClient()
 
@@ -185,7 +198,13 @@ func (a *app) setup() {
 			logf("launch at login: %v", err)
 		}
 	}
-	if err := hotkey.Listen(func() { a.runOp(a.doCycle) }); err != nil {
+	if err := hotkey.Listen(func(n int) {
+		if n == 0 {
+			a.runOp(a.doCycle)
+			return
+		}
+		a.runOp(func() error { return a.doSwitchAt(n - 1) })
+	}); err != nil {
 		logf("hotkey: %v", err)
 	}
 
@@ -247,7 +266,8 @@ func (a *app) buildAndSetMenu() {
 		it := fyne.NewMenuItem(p.Label, func() {
 			a.runOp(func() error { return a.doSwitch(id) })
 		})
-		it.Icon = fyne.NewStaticResource(fmt.Sprintf("swatch%d.png", i), icon.Swatch(i))
+		ci := p.ColorIndex(i)
+		it.Icon = fyne.NewStaticResource(fmt.Sprintf("swatch%d.png", ci), icon.Swatch(ci))
 		if parallel {
 			dir, _ := filepath.Abs(a.store.ProfileDir(id))
 			it.Checked = running[filepath.Clean(dir)]
@@ -405,8 +425,53 @@ func (a *app) doRestoreParallel(ids []string) error {
 // file-mutating account operations) and never blocks the UI thread.
 func (a *app) startStatsLoop() {
 	a.refreshStats()
+	a.maybeWeeklySummary()
 	for range time.Tick(statsInterval) {
 		a.refreshStats()
+		a.maybeWeeklySummary()
+	}
+}
+
+// summaryEvery is how often the usage summary notification goes out.
+const summaryEvery = 7 * 24 * time.Hour
+
+// maybeWeeklySummary sends one notification covering the last seven days of
+// each account's peaks. The first call only starts the clock, since there is
+// nothing to summarize yet.
+func (a *app) maybeWeeklySummary() {
+	a.mu.Lock()
+	first := a.cfg.LastSummary.IsZero()
+	due := first || time.Since(a.cfg.LastSummary) >= summaryEvery
+	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
+	if due {
+		a.cfg.LastSummary = time.Now()
+		if err := a.store.Save(a.cfg); err != nil {
+			logf("weekly summary: save config: %v", err)
+		}
+	}
+	a.mu.Unlock()
+	if !due || first {
+		return
+	}
+
+	var parts []string
+	for _, p := range profiles {
+		d, err := usage.LoadDaily(a.store.DailyPath(p.ID))
+		if err != nil {
+			continue
+		}
+		sum, days := d.Summary(time.Now(), 7)
+		if days == 0 {
+			continue
+		}
+		part := fmt.Sprintf("%s: peak %.0f%% session, %.0f%% weekly", p.Label, sum.PeakSession, sum.PeakWeek)
+		if sum.Hits > 0 {
+			part += fmt.Sprintf(", limit hit %d×", sum.Hits)
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) > 0 {
+		_ = zenity.Notify("Last 7 days · " + strings.Join(parts, " · "))
 	}
 }
 
@@ -472,6 +537,32 @@ func (a *app) checkForUpdates() {
 	a.refresh()
 }
 
+// installUpdate replaces the running app with the release when it can, and
+// otherwise (a dev build, a read-only install location, another OS, or any
+// failure) opens the release page so the update is never a dead end.
+func (a *app) installUpdate(tag, pageURL string) {
+	if selfupdate.Supported() && a.updating.CompareAndSwap(false, true) {
+		defer a.updating.Store(false)
+		_ = zenity.Notify("Downloading " + tag + "…")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		err := selfupdate.Install(ctx, selfupdate.DMGURL(tag))
+		if err == nil {
+			fyne.Do(a.fyneApp.Quit) // the helper swaps the app in once we exit
+			return
+		}
+		logf("install update: %v", err)
+	}
+	u, err := url.Parse(pageURL)
+	if err != nil {
+		logf("update menu: bad release URL %q: %v", pageURL, err)
+		return
+	}
+	if err := a.fyneApp.OpenURL(u); err != nil {
+		logf("update menu: open release URL: %v", err)
+	}
+}
+
 // updateMenuItem is the tray menu's update row — this is the only UI for
 // checking updates; there is deliberately no Settings tab for it, so it works
 // without opening that window. Three states: a disabled "Checking…" row while
@@ -490,16 +581,11 @@ func (a *app) updateMenuItem() *fyne.MenuItem {
 		it.Disabled = true
 		return it
 	case latest != "" && updatecheck.IsNewer(version, latest):
-		return fyne.NewMenuItem(fmt.Sprintf("Update available: %s", latest), func() {
-			u, err := url.Parse(latestURL)
-			if err != nil {
-				logf("update menu: bad release URL %q: %v", latestURL, err)
-				return
-			}
-			if err := a.fyneApp.OpenURL(u); err != nil {
-				logf("update menu: open release URL: %v", err)
-			}
-		})
+		label := fmt.Sprintf("Update available: %s", latest)
+		if selfupdate.Supported() {
+			label = fmt.Sprintf("Install update: %s", latest)
+		}
+		return fyne.NewMenuItem(label, func() { go a.installUpdate(latest, latestURL) })
 	default:
 		return fyne.NewMenuItem("Check for Updates", func() { go a.checkForUpdates() })
 	}
@@ -550,14 +636,15 @@ func (a *app) refreshStats() {
 // unavailable" rather than surfaced as an app error, since inactive profiles'
 // tokens may simply have expired.
 func (a *app) refreshOneStat(id string) {
-	dir := a.store.ProfileDir(id)
+	dir, inUse := a.credentialDir(id)
 	cred, err := secret.SessionCredential(dir)
 	if err != nil {
 		logf("stats: decrypt failed for %q: %v", id, err)
 		a.setStatEntry(id, statEntry{err: err})
 		return
 	}
-	if !cred.ExpiresAt.IsZero() && time.Until(cred.ExpiresAt) < 2*time.Minute && cred.RefreshToken != "" {
+	expiring := !cred.ExpiresAt.IsZero() && time.Until(cred.ExpiresAt) < 2*time.Minute
+	if expiring && cred.RefreshToken != "" && !inUse && secret.CanStoreRefreshed() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		refreshed, rerr := a.usageClient.Refresh(ctx, cred.RefreshToken, usage.ScopeFromCacheKey(cred.CacheKey))
 		cancel()
@@ -593,12 +680,39 @@ func (a *app) refreshOneStat(id string) {
 	if err := usage.AppendHistory(a.historyPath(id), sample); err != nil {
 		logf("stats: append history failed for %q: %v", id, err)
 	}
+	if err := os.MkdirAll(filepath.Dir(a.store.DailyPath(id)), 0o700); err == nil {
+		err = usage.RecordDaily(a.store.DailyPath(id), now, stats.FiveHour.Utilization, stats.SevenDay.Utilization, stats.FiveHour.ResetsAt.Unix())
+		if err != nil {
+			logf("stats: record daily failed for %q: %v", id, err)
+		}
+	}
 	a.maybeWarn(id, stats)
 	a.maybeAutoSwitch(id, stats)
 }
 
+// credentialDir is where a profile's freshest token lives: the live data
+// directory for the active account in switch mode, otherwise its snapshot.
+// inUse reports that a Claude window owns that directory. Claude refreshes
+// the token itself then, and a refresh from here would consume a refresh
+// token Claude still holds and could log that window out.
+func (a *app) credentialDir(id string) (dir string, inUse bool) {
+	a.mu.Lock()
+	active := id == a.cfg.ActiveProfile
+	parallel := a.cfg.IsParallel()
+	a.mu.Unlock()
+	dir = a.store.ProfileDir(id)
+	if parallel {
+		running, _ := claude.DataDirRunning(dir)
+		return dir, running
+	}
+	if active && a.sw != nil {
+		return a.sw.LiveDir(), true
+	}
+	return dir, false
+}
+
 // maybeAutoSwitch switches away from the active profile once its session
-// usage reaches 100%, picking whichever other profile has the most room left.
+// usage reaches the auto-switch percent, picking whichever other profile has the most room left.
 // It only applies to the active profile in switch mode (side-by-side already
 // keeps every account open) and fires once per reset window, the same
 // debounce scheme maybeWarn uses for limit notifications.
@@ -607,13 +721,20 @@ func (a *app) maybeAutoSwitch(id string, stats usage.Stats) {
 	enabled := a.cfg.AutoSwitchOnLimit
 	isActive := id == a.cfg.ActiveProfile
 	parallel := a.cfg.IsParallel()
+	threshold := a.cfg.AutoSwitchPercent()
+	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	a.mu.Unlock()
 	if !enabled || !isActive || parallel {
 		return
 	}
 
-	if stats.FiveHour.Utilization < 100 {
+	if stats.FiveHour.Utilization < float64(threshold) {
 		a.forgetAlerts(id, "autoswitch")
+		return
+	}
+	// Only move to an account that is itself under the threshold, or two
+	// busy accounts would keep switching back and forth.
+	if best, load, ok := a.freest(profiles); !ok || best == id || load.Session >= float64(threshold) {
 		return
 	}
 
@@ -629,7 +750,7 @@ func (a *app) maybeAutoSwitch(id string, stats usage.Stats) {
 	a.alerted[key] = struct{}{}
 	a.alertMu.Unlock()
 
-	logf("auto-switch: %q hit 100%% session usage, switching to the most available profile", id)
+	logf("auto-switch: %q hit %d%% session usage, switching to the most available profile", id, threshold)
 	a.runOp(a.doUseFreest)
 }
 
@@ -691,9 +812,14 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 		items = append(items, dimItem(plan))
 	}
 	fh, sd := e.stats.FiveHour, e.stats.SevenDay
+	session := fmt.Sprintf("Session %.0f%% · resets %s%s", fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"), stale)
+	if history, err := usage.LoadHistory(a.historyPath(id)); err == nil {
+		if eta, ok := usage.ForecastSession(history, time.Now(), fh.ResetsAt); ok {
+			session += " · full ~" + eta.Local().Format("3:04pm")
+		}
+	}
 	items = append(items,
-		gaugeItem(fmt.Sprintf("Session %.0f%% · resets %s%s",
-			fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"), stale), fh.Utilization, a.openSettings),
+		gaugeItem(session, fh.Utilization, a.openSettings),
 		gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s%s",
 			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2"), stale), sd.Utilization, a.openSettings),
 	)
@@ -783,6 +909,15 @@ func (a *app) safeRun(fn func() error) (err error) {
 	return fn()
 }
 
+// unlocked runs a dialog from inside an operation without the state lock, so
+// the tray menu, spinner and stats keep working while the question is open.
+// Operations are serialized by opWorker, so cfg cannot change meanwhile.
+func (a *app) unlocked(dialog func() error) error {
+	a.mu.Unlock()
+	defer a.mu.Lock()
+	return dialog()
+}
+
 func (a *app) setBusy(b bool) {
 	a.mu.Lock()
 	a.busy = b
@@ -852,8 +987,16 @@ func (a *app) updateTrayIcon(profiles []profile.Profile, activeID string, hasAct
 				}
 			}
 		}
-		data := icon.MultiProfileIcon(len(profiles), activeIndex)
-		next = fyne.NewStaticResource(fmt.Sprintf("cd-switcher-multi-%d-%d", len(profiles), activeIndex), data)
+		colors := make([]int, len(profiles))
+		for i, p := range profiles {
+			colors[i] = p.ColorIndex(i)
+		}
+		data := icon.MultiProfileIconColors(colors, activeIndex)
+		next = fyne.NewStaticResource(fmt.Sprintf("cd-switcher-multi-%d-%d-%v", len(profiles), activeIndex, colors), data)
+	} else if hasActive {
+		if pct, ok := a.sessionPercent(activeID); ok {
+			next = fyne.NewStaticResource(fmt.Sprintf("cd-switcher-gauge-%.0f", pct), icon.TrayGauge(pct))
+		}
 	}
 	a.restIcon = next
 
@@ -865,6 +1008,18 @@ func (a *app) updateTrayIcon(profiles []profile.Profile, activeID string, hasAct
 	}
 }
 
+// sessionPercent is a profile's last-read session utilization, rounded so the
+// tray icon only changes when the whole number does.
+func (a *app) sessionPercent(id string) (float64, bool) {
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	e, ok := a.statsCache[id]
+	if !ok || e.fetchedAt.IsZero() {
+		return 0, false
+	}
+	return math.Round(e.stats.FiveHour.Utilization), true
+}
+
 // --- operations (run with a.mu held, on the worker goroutine) ---
 
 func (a *app) doSwitch(id string) error {
@@ -874,10 +1029,24 @@ func (a *app) doSwitch(id string) error {
 	if a.cfg.IsParallel() {
 		return a.doOpenParallel(id)
 	}
+	if a.pendingLogin {
+		return errors.New("finish adding the new account first: choose “Save this account” in the menu")
+	}
 	p, _ := a.cfg.Find(id)
 	logf("switching to %q (id=%s)", p.Label, id)
+	from := a.cfg.ActiveProfile
+	if a.cfg.SwitchCLI && from != "" {
+		if err := clicreds.Save(from); err != nil {
+			logf("save CLI login for %q: %v", from, err)
+		}
+	}
 	if err := a.sw.SwitchTo(a.cfg, id, true); err != nil {
 		return err
+	}
+	if a.cfg.SwitchCLI {
+		if _, err := clicreds.Restore(id); err != nil {
+			logf("restore CLI login for %q: %v", p.Label, err)
+		}
 	}
 	logf("switched to %q", p.Label)
 	_ = zenity.Notify(fmt.Sprintf("Switched to %s", p.Label))
@@ -889,11 +1058,13 @@ func (a *app) doSetMode(mode string) error {
 		return errors.New("Claude Desktop data directory not found")
 	}
 	if mode == profile.ModeParallel {
-		err := zenity.Question(
-			"Side by side quits the current Claude window and lets you open each account in its own window.\n\nClaude has to accept a separate data directory for this. If a second window does not stay open, switch back.",
-			zenity.Title("Side by side"),
-			zenity.OKLabel("Use side by side"),
-		)
+		err := a.unlocked(func() error {
+			return zenity.Question(
+				"Side by side quits the current Claude window and lets you open each account in its own window.\n\nClaude has to accept a separate data directory for this. If a second window does not stay open, switch back.",
+				zenity.Title("Side by side"),
+				zenity.OKLabel("Use side by side"),
+			)
+		})
 		if err != nil {
 			return err
 		}
@@ -946,10 +1117,11 @@ func (a *app) freest(profiles []profile.Profile) (string, usage.AccountLoad, boo
 	for i, p := range profiles {
 		e, ok := a.statsCache[p.ID]
 		loads[i] = usage.AccountLoad{
-			ID:      p.ID,
-			Session: e.stats.FiveHour.Utilization,
-			Week:    e.stats.SevenDay.Utilization,
-			Ready:   ok && !e.fetchedAt.IsZero(),
+			ID:       p.ID,
+			Session:  e.stats.FiveHour.Utilization,
+			Week:     e.stats.SevenDay.Utilization,
+			ResetsIn: time.Until(e.stats.FiveHour.ResetsAt),
+			Ready:    ok && !e.fetchedAt.IsZero(),
 		}
 	}
 	a.statsMu.Unlock()
@@ -1003,7 +1175,9 @@ func (a *app) maybeWarn(id string, stats usage.Stats) {
 
 func (a *app) warnWindow(label, id, window string, w usage.Window, threshold int) {
 	if w.Utilization < float64(threshold) {
-		a.forgetAlerts(id, window)
+		if a.forgetAlerts(id, window) {
+			_ = zenity.Notify(fmt.Sprintf("%s's %s limit has reset.", label, window))
+		}
 		return
 	}
 	key := alertKey{id: id, window: window, resetUnix: w.ResetsAt.Unix()}
@@ -1025,14 +1199,20 @@ func (a *app) warnWindow(label, id, window string, w usage.Window, threshold int
 	_ = zenity.Notify(msg)
 }
 
-func (a *app) forgetAlerts(id, window string) {
+// forgetAlerts clears a window's alert marks and reports whether one of them
+// was for a reset time that has now passed, i.e. the limit really did reset.
+func (a *app) forgetAlerts(id, window string) (reset bool) {
 	a.alertMu.Lock()
+	defer a.alertMu.Unlock()
 	for key := range a.alerted {
 		if key.id == id && key.window == window {
+			if key.resetUnix <= time.Now().Unix() {
+				reset = true
+			}
 			delete(a.alerted, key)
 		}
 	}
-	a.alertMu.Unlock()
+	return reset
 }
 
 // doUseFreest switches to, or opens, the account with the lowest session
@@ -1075,6 +1255,27 @@ func (a *app) recheckWarnings() {
 	for id, stats := range cached {
 		a.maybeWarn(id, stats)
 	}
+}
+
+func (a *app) doSetAutoSwitchAt(percent int) error {
+	a.cfg.AutoSwitchAt = percent
+	return a.store.Save(a.cfg)
+}
+
+func (a *app) doSetSwitchCLI(on bool) error {
+	a.cfg.SwitchCLI = on
+	return a.store.Save(a.cfg)
+}
+
+// doCycleColor gives an account the next swatch colour in the palette.
+func (a *app) doCycleColor(id string) error {
+	for i, p := range a.cfg.Profiles {
+		if p.ID == id {
+			a.cfg.SetColor(id, (p.ColorIndex(i)+1)%icon.PaletteSize())
+			return a.store.Save(a.cfg)
+		}
+	}
+	return nil
 }
 
 func (a *app) doSetLogin(on bool) error {
@@ -1131,6 +1332,20 @@ func (a *app) doCycle() error {
 	return a.doSwitch(a.cfg.Profiles[next].ID)
 }
 
+// doSwitchAt switches to (or, side by side, opens) the account at position
+// i, for the Control-Option-number hotkeys. A position with no account, or
+// the account already active, does nothing.
+func (a *app) doSwitchAt(i int) error {
+	if i < 0 || i >= len(a.cfg.Profiles) {
+		return nil
+	}
+	id := a.cfg.Profiles[i].ID
+	if id == a.cfg.ActiveProfile && !a.cfg.IsParallel() {
+		return nil
+	}
+	return a.doSwitch(id)
+}
+
 func (a *app) doAddAccount() error {
 	if a.sw == nil {
 		return errors.New("Claude Desktop data directory not found")
@@ -1144,11 +1359,13 @@ func (a *app) doAddAccount() error {
 		}
 	}
 
-	err := zenity.Question(
-		"This will quit Claude Desktop, save your current account, and open a fresh login screen.\n\nLog into the other account, then choose “Save this account”.",
-		zenity.Title("Add account"),
-		zenity.OKLabel("Continue"),
-	)
+	err := a.unlocked(func() error {
+		return zenity.Question(
+			"This will quit Claude Desktop, save your current account, and open a fresh login screen.\n\nLog into the other account, then choose “Save this account”.",
+			zenity.Title("Add account"),
+			zenity.OKLabel("Continue"),
+		)
+	})
 	if err != nil {
 		return err // ErrCanceled handled upstream
 	}
@@ -1164,11 +1381,7 @@ func (a *app) doSaveAccount() error {
 	if a.sw == nil {
 		return errors.New("Claude Desktop data directory not found")
 	}
-	label, err := zenity.Entry(
-		"Name this account:",
-		zenity.Title("Save account"),
-		zenity.EntryText("Work"),
-	)
+	label, err := a.askLabel("Name this account:", "Save account", "Work")
 	if err != nil {
 		return err
 	}
@@ -1193,11 +1406,7 @@ func (a *app) doRename(id string) error {
 	if !ok {
 		return fmt.Errorf("profile %q not found", id)
 	}
-	label, err := zenity.Entry(
-		"New name for this account:",
-		zenity.Title("Rename account"),
-		zenity.EntryText(p.Label),
-	)
+	label, err := a.askLabel("New name for this account:", "Rename account", p.Label)
 	if err != nil {
 		return err // ErrCanceled handled upstream
 	}
@@ -1215,11 +1424,13 @@ func (a *app) doRemove(id string) error {
 		return fmt.Errorf("profile %q not found", id)
 	}
 	if len(a.cfg.Profiles) <= 1 {
-		_ = zenity.Info(
-			"This is your only account profile. Rename it, or add another account before removing this one.",
-			zenity.Title("Remove account"),
-		)
-		return nil
+		return a.unlocked(func() error {
+			_ = zenity.Info(
+				"This is your only account profile. Rename it, or add another account before removing this one.",
+				zenity.Title("Remove account"),
+			)
+			return nil
+		})
 	}
 	msg := fmt.Sprintf(
 		"Remove the account profile “%s”?\n\nThis deletes CD-Switcher's saved snapshot for it. Your live Claude login is not touched.",
@@ -1228,7 +1439,10 @@ func (a *app) doRemove(id string) error {
 	if a.cfg.ActiveProfile == id {
 		msg += "\n\nThis is the active profile, so CD-Switcher will stop tracking it."
 	}
-	if err := zenity.Question(msg, zenity.Title("Remove account"), zenity.OKLabel("Remove")); err != nil {
+	err := a.unlocked(func() error {
+		return zenity.Question(msg, zenity.Title("Remove account"), zenity.OKLabel("Remove"))
+	})
+	if err != nil {
 		return err // ErrCanceled handled upstream
 	}
 
@@ -1238,6 +1452,14 @@ func (a *app) doRemove(id string) error {
 	if err := a.store.Save(a.cfg); err != nil {
 		return err
 	}
+	if err := clicreds.Forget(id); err != nil {
+		logf("remove saved CLI login %q: %v", id, err)
+	}
+	if a.cfg.IsParallel() && a.sw != nil {
+		if err := a.sw.CloseParallel(id); err != nil {
+			logf("close window for %q before removing it: %v", id, err)
+		}
+	}
 	if err := a.store.RemoveSnapshot(id); err != nil {
 		logf("remove snapshot %q failed (config already updated): %v", id, err)
 	}
@@ -1245,14 +1467,19 @@ func (a *app) doRemove(id string) error {
 	return nil
 }
 
+// askLabel shows a text prompt with the state lock released (see unlocked).
+func (a *app) askLabel(prompt, title, initial string) (label string, err error) {
+	err = a.unlocked(func() error {
+		label, err = zenity.Entry(prompt, zenity.Title(title), zenity.EntryText(initial))
+		return err
+	})
+	return label, err
+}
+
 // captureCurrent snapshots the currently logged-in account as a new active
 // profile, prompting for a label. Quits and relaunches Claude.
 func (a *app) captureCurrent(defaultLabel string) error {
-	label, err := zenity.Entry(
-		"Name the account you're currently signed into:",
-		zenity.Title("Capture current account"),
-		zenity.EntryText(defaultLabel),
-	)
+	label, err := a.askLabel("Name the account you're currently signed into:", "Capture current account", defaultLabel)
 	if err != nil {
 		return err
 	}

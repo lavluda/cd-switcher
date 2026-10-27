@@ -76,6 +76,9 @@ var swatchPalette = []color.RGBA{
 	{0x9A, 0x5B, 0x8A, 0xFF}, // plum
 }
 
+// PaletteSize is how many swatch colours profiles can choose from.
+func PaletteSize() int { return len(swatchPalette) }
+
 // gap is the empty space in pixels between adjacent swatches.
 const gap = 4
 
@@ -84,8 +87,20 @@ const gap = 4
 // out-of-range value to mean "none") gets a bright ring so the active account
 // stays identifiable at a glance. n < 1 falls back to a single swatch.
 func MultiProfileIcon(n, activeIndex int) []byte {
+	colors := make([]int, max(n, 1))
+	for i := range colors {
+		colors[i] = i
+	}
+	return MultiProfileIconColors(colors, activeIndex)
+}
+
+// MultiProfileIconColors is MultiProfileIcon with an explicit palette index
+// per swatch, so a profile keeps the colour it was given.
+func MultiProfileIconColors(colors []int, activeIndex int) []byte {
+	n := len(colors)
 	if n < 1 {
 		n = 1
+		colors = []int{0}
 	}
 	width := n*size + (n-1)*gap
 	img := image.NewRGBA(image.Rect(0, 0, width, size))
@@ -93,7 +108,7 @@ func MultiProfileIcon(n, activeIndex int) []byte {
 
 	for i := 0; i < n; i++ {
 		ox := i * (size + gap)
-		c := swatchPalette[i%len(swatchPalette)]
+		c := swatchPalette[colors[i]%len(swatchPalette)]
 		const r = 6
 		for y := 0; y < size; y++ {
 			for x := 0; x < size; x++ {
@@ -184,23 +199,26 @@ func Swatch(i int) []byte {
 	return encode(img)
 }
 
-// Gauge renders a ring filled clockwise from 12 o'clock to pct (0–100):
-// green under 50, amber under 80, red from 80 up.
-func Gauge(pct float64) []byte {
-	fill := color.RGBA{0x34, 0xC7, 0x59, 0xFF}
+// gaugeColor is green under 50, amber under 80, red from 80 up.
+func gaugeColor(pct float64) color.RGBA {
 	switch {
 	case pct >= 80:
-		fill = color.RGBA{0xFF, 0x45, 0x3A, 0xFF}
+		return color.RGBA{0xFF, 0x45, 0x3A, 0xFF}
 	case pct >= 50:
-		fill = color.RGBA{0xFF, 0x9F, 0x0A, 0xFF}
+		return color.RGBA{0xFF, 0x9F, 0x0A, 0xFF}
 	}
+	return color.RGBA{0x34, 0xC7, 0x59, 0xFF}
+}
+
+// drawGauge paints a ring centred on (cx, cy), filled clockwise from 12
+// o'clock to pct (0–100) in gaugeColor over a grey track.
+func drawGauge(img *image.RGBA, cx, cy, outer, inner, pct float64) {
+	fill := gaugeColor(pct)
 	track := color.RGBA{0x8E, 0x8E, 0x93, 0x66}
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	const outer, inner = 14.0, 9.5
-	mid := float64(size) / 2
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			dx, dy := float64(x)+0.5-mid, float64(y)+0.5-mid
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dx, dy := float64(x)+0.5-cx, float64(y)+0.5-cy
 			d := math.Hypot(dx, dy)
 			if d > outer || d < inner {
 				continue
@@ -216,5 +234,27 @@ func Gauge(pct float64) []byte {
 			}
 		}
 	}
+}
+
+// Gauge renders a full-size usage ring for a menu row.
+func Gauge(pct float64) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	drawGauge(img, size/2, size/2, 14, 9.5, pct)
+	return encode(img)
+}
+
+// TrayGauge is the tray icon with a small usage ring in its bottom-right
+// corner, on a dark disc so it reads against any menu-bar background.
+func TrayGauge(pct float64) []byte {
+	img := baseImage()
+	const cx, cy = 22.0, 22.0
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			if math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy) <= 10 {
+				img.Set(x, y, color.RGBA{0x1C, 0x1C, 0x1E, 0xFF})
+			}
+		}
+	}
+	drawGauge(img, cx, cy, 8.5, 5, pct)
 	return encode(img)
 }
