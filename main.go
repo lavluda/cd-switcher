@@ -102,6 +102,9 @@ type app struct {
 	// on the menu row doesn't start another.
 	updating atomic.Bool
 
+	// statsRefreshing drops a "Refresh usage" click while a fetch is running.
+	statsRefreshing atomic.Bool
+
 	// statsMu guards statsCache. It is deliberately separate from mu: usage
 	// fetches make network calls and must never be held up by (or hold up)
 	// the file-mutation lock.
@@ -262,6 +265,9 @@ func (a *app) buildAndSetMenu() {
 	items := []*fyne.MenuItem{status, fyne.NewMenuItemSeparator()}
 
 	for i, p := range profiles {
+		if i > 0 {
+			items = append(items, fyne.NewMenuItemSeparator())
+		}
 		id := p.ID
 		it := fyne.NewMenuItem(p.Label, func() {
 			a.runOp(func() error { return a.doSwitch(id) })
@@ -278,10 +284,13 @@ func (a *app) buildAndSetMenu() {
 		items = append(items, it)
 		items = append(items, a.statLinesFor(id)...)
 	}
+	items = append(items, fyne.NewMenuItemSeparator())
 	if item, ok := a.freestMenuItem(profiles, active.ID, hasActive, parallel); ok {
 		items = append(items, item)
 	}
-	items = append(items, fyne.NewMenuItemSeparator())
+	refreshItem := fyne.NewMenuItem("Refresh usage", func() { go a.refreshStats(0) })
+	refreshItem.Icon = theme.ViewRefreshIcon()
+	items = append(items, refreshItem)
 
 	if pending {
 		items = append(items, fyne.NewMenuItem("✓ Save this account", func() {
@@ -337,7 +346,7 @@ func (a *app) openSettings() {
 	a.settingsWin.SetContent(a.settingsContent())
 	a.settingsWin.Show()
 	a.settingsWin.RequestFocus()
-	go a.refreshStats()
+	go a.refreshStats(statsMinAge)
 }
 
 // statsInterval is the background usage-stats poll cadence. The endpoint is
@@ -424,10 +433,10 @@ func (a *app) doRestoreParallel(ids []string) error {
 // as long as the app runs. It never touches a.ops/opWorker (reserved for
 // file-mutating account operations) and never blocks the UI thread.
 func (a *app) startStatsLoop() {
-	a.refreshStats()
+	a.refreshStats(statsMinAge)
 	a.maybeWeeklySummary()
 	for range time.Tick(statsInterval) {
-		a.refreshStats()
+		a.refreshStats(statsMinAge)
 		a.maybeWeeklySummary()
 	}
 }
@@ -592,8 +601,12 @@ func (a *app) updateMenuItem() *fyne.MenuItem {
 }
 
 // refreshStats fetches usage stats for every profile not refreshed within
-// statsMinAge, concurrently, then repaints the menu/settings window once.
-func (a *app) refreshStats() {
+// minAge, concurrently, then repaints the menu/settings window once.
+func (a *app) refreshStats(minAge time.Duration) {
+	if !a.statsRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.statsRefreshing.Store(false)
 	a.mu.Lock()
 	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	a.mu.Unlock()
@@ -603,7 +616,7 @@ func (a *app) refreshStats() {
 		a.statsMu.Lock()
 		entry, ok := a.statsCache[p.ID]
 		a.statsMu.Unlock()
-		if ok && time.Since(entry.fetchedAt) < statsMinAge {
+		if ok && time.Since(entry.fetchedAt) < minAge {
 			continue
 		}
 		pending = append(pending, p.ID)
@@ -799,20 +812,24 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 	if !ok || e.fetchedAt.IsZero() {
 		return []*fyne.MenuItem{dimItem("usage: —")}
 	}
-	stale := ""
+	// One dimmed line under the account name: plan, org, and whether the
+	// numbers below are from the last successful fetch.
+	head := e.plan
+	if e.tier != "" {
+		head += " · " + e.tier
+	}
 	if e.err != nil {
-		stale = " (stale)"
+		if head != "" {
+			head += " · "
+		}
+		head += "stale"
 	}
 	var items []*fyne.MenuItem
-	if e.plan != "" {
-		plan := e.plan
-		if e.tier != "" {
-			plan += " · " + e.tier
-		}
-		items = append(items, dimItem(plan))
+	if head != "" {
+		items = append(items, dimItem(head))
 	}
 	fh, sd := e.stats.FiveHour, e.stats.SevenDay
-	session := fmt.Sprintf("Session %.0f%% · resets %s%s", fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"), stale)
+	session := fmt.Sprintf("Session %.0f%% · resets %s", fh.Utilization, fh.ResetsAt.Local().Format("3:04pm"))
 	if history, err := usage.LoadHistory(a.historyPath(id)); err == nil {
 		if eta, ok := usage.ForecastSession(history, time.Now(), fh.ResetsAt); ok {
 			session += " · full ~" + eta.Local().Format("3:04pm")
@@ -820,14 +837,22 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 	}
 	items = append(items,
 		gaugeItem(session, fh.Utilization, a.openSettings),
-		gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s%s",
-			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2"), stale), sd.Utilization, a.openSettings),
+		gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s",
+			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2")), sd.Utilization, a.openSettings),
 	)
+	// Accounts with Fable get its own weekly limit; the other model meters
+	// stay in Settings.
+	for _, m := range e.stats.Meters() {
+		if strings.Contains(strings.ToLower(m.Label), "fable") {
+			items = append(items, gaugeItem(fmt.Sprintf("%s %.0f%% · resets %s",
+				m.Label, m.Utilization, m.ResetsAt.Local().Format("Mon Jan 2")), m.Utilization, a.openSettings))
+		}
+	}
 	if short := e.stats.Tokens.Short(); short != "" {
-		items = append(items, dimItem("tokens "+short+stale))
+		items = append(items, dimItem("tokens "+short))
 	}
 	if spend := e.stats.ExtraUsage.SpendLabel(); spend != "" {
-		items = append(items, dimItem(spend+stale))
+		items = append(items, dimItem(spend))
 	}
 	return items
 }

@@ -120,7 +120,7 @@ func (a *app) accountsTabContent() fyne.CanvasObject {
 	title := headingText("Accounts")
 	sub := widget.NewLabel("Create and manage multiple Claude accounts")
 	sub.Importance = widget.LowImportance
-	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() { go a.refreshStats() })
+	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() { go a.refreshStats(0) })
 	refreshBtn.Importance = widget.LowImportance
 	header := container.NewBorder(nil, nil, vbox(2, title, sub), refreshBtn)
 

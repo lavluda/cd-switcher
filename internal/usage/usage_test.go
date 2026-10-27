@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +60,27 @@ func TestFetchNon2xx(t *testing.T) {
 	_, err := c.Fetch(context.Background(), "bad-token")
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestFableMeterFromEitherShape(t *testing.T) {
+	for _, body := range []string{
+		`{"seven_day_fable":{"utilization":12,"resets_at":"2026-10-30T00:00:00Z"}}`,
+		`{"limits":[{"kind":"weekly_scoped","percent":12,"resets_at":"2026-10-30T00:00:00Z","scope":{"model":{"display_name":"Fable"}}}]}`,
+	} {
+		var s Stats
+		if err := json.Unmarshal([]byte(body), &s); err != nil {
+			t.Fatal(err)
+		}
+		var got *Meter
+		for _, m := range s.Meters() {
+			if m.Label == "Fable" {
+				got = &m
+			}
+		}
+		if got == nil || got.Utilization != 12 {
+			t.Errorf("no Fable meter from %s: %+v", body, s.Meters())
+		}
 	}
 }
 

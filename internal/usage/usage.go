@@ -132,6 +132,7 @@ type Stats struct {
 	SevenDay            Window
 	SevenDaySonnet      Window
 	SevenDayOpus        Window
+	SevenDayFable       Window
 	SevenDayCowork      Window
 	SevenDayOAuthApps   Window
 	SevenDayOmelette    Window
@@ -167,6 +168,7 @@ func (s Stats) Meters() []Meter {
 	add("This week", s.SevenDay, true)
 	add("Sonnet", s.SevenDaySonnet, false)
 	add("Opus", s.SevenDayOpus, false)
+	add("Fable", s.SevenDayFable, false)
 	add("Cowork", s.SevenDayCowork, false)
 	add("Apps", s.SevenDayOAuthApps, false)
 	add("Other", s.SevenDayOmelette, false)
@@ -422,6 +424,7 @@ func mergeStats(primary, fallback Stats) Stats {
 	primary.SevenDay = pickWindow(primary.SevenDay, fallback.SevenDay)
 	primary.SevenDaySonnet = pickWindow(primary.SevenDaySonnet, fallback.SevenDaySonnet)
 	primary.SevenDayOpus = pickWindow(primary.SevenDayOpus, fallback.SevenDayOpus)
+	primary.SevenDayFable = pickWindow(primary.SevenDayFable, fallback.SevenDayFable)
 	primary.SevenDayCowork = pickWindow(primary.SevenDayCowork, fallback.SevenDayCowork)
 	primary.SevenDayOAuthApps = pickWindow(primary.SevenDayOAuthApps, fallback.SevenDayOAuthApps)
 	primary.SevenDayOmelette = pickWindow(primary.SevenDayOmelette, fallback.SevenDayOmelette)
@@ -451,6 +454,7 @@ func (s *Stats) UnmarshalJSON(data []byte) error {
 		SevenDay            Window     `json:"seven_day"`
 		SevenDaySonnet      Window     `json:"seven_day_sonnet"`
 		SevenDayOpus        Window     `json:"seven_day_opus"`
+		SevenDayFable       Window     `json:"seven_day_fable"`
 		SevenDayCowork      Window     `json:"seven_day_cowork"`
 		SevenDayOAuthApps   Window     `json:"seven_day_oauth_apps"`
 		SevenDayOmelette    Window     `json:"seven_day_omelette"`
@@ -465,6 +469,7 @@ func (s *Stats) UnmarshalJSON(data []byte) error {
 	s.SevenDay = raw.SevenDay
 	s.SevenDaySonnet = raw.SevenDaySonnet
 	s.SevenDayOpus = raw.SevenDayOpus
+	s.SevenDayFable = raw.SevenDayFable
 	s.SevenDayCowork = raw.SevenDayCowork
 	s.SevenDayOAuthApps = raw.SevenDayOAuthApps
 	s.SevenDayOmelette = raw.SevenDayOmelette
