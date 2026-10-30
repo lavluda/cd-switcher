@@ -82,6 +82,8 @@ type app struct {
 	// the tab the user is looking at instead of snapping back to the first
 	// one each time. UI-thread only, like settingsWin.
 	settingsTabIndex int
+	// usage is the Usage page's log scanner and filter choices.
+	usage usageState
 
 	normalIcon fyne.Resource
 	spin       []fyne.Resource // spinner animation frames

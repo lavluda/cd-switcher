@@ -97,6 +97,12 @@ rename, and remove actions.
 CD-Switcher also looks after the command-line tools you use next to Claude
 Desktop. Each one has a tab in Settings.
 
+**Usage.** Today, the last 7 or the last 30 days of Claude Code and Codex
+use, read from the session logs both tools keep on this machine: estimated
+cost at API list prices, requests, tokens and cache hits, a chart by hour or
+day (click a figure to chart it), and tables by model and by project. The logs
+are only read; nothing leaves the machine.
+
 **Claude Code login.** "Switch Claude Code login too" (Switching) gives
 each account its own CLI login: the Keychain item on macOS,
 `~/.claude/.credentials.json` on Linux and Windows. Only the account keys

@@ -8,6 +8,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/lavluda/cd-switcher/internal/uitheme"
@@ -121,6 +122,15 @@ type segmentedControl struct {
 	options  []string
 	selected int
 	onChange func(int)
+	// quiet marks the choice with a raised neutral segment instead of the
+	// accent fill, for filters that should not compete with the content.
+	quiet bool
+}
+
+func newQuietSegmented(options []string, selected int, onChange func(int)) *segmentedControl {
+	s := newSegmentedControl(options, selected, onChange)
+	s.quiet = true
+	return s
 }
 
 func newSegmentedControl(options []string, selected int, onChange func(int)) *segmentedControl {
@@ -137,7 +147,17 @@ func (s *segmentedControl) SetSelected(i int) {
 	s.Refresh()
 }
 
-func (s *segmentedControl) MinSize() fyne.Size { return fyne.NewSize(240, 36) }
+// MinSize gives every segment room for the longest label.
+func (s *segmentedControl) MinSize() fyne.Size {
+	widest := float32(0)
+	for _, o := range s.options {
+		widest = max(widest, fyne.MeasureText(o, 13, fyne.TextStyle{Bold: true}).Width)
+	}
+	if s.quiet {
+		return fyne.NewSize(float32(len(s.options))*(widest+28), 32)
+	}
+	return fyne.NewSize(max(240, float32(len(s.options))*(widest+28)), 36)
+}
 
 // Cursor marks the control as clickable when hovered.
 func (s *segmentedControl) Cursor() desktop.Cursor { return desktop.PointerCursor }
@@ -218,11 +238,22 @@ func (r *segmentedRenderer) Refresh() {
 	r.track.FillColor = uitheme.CurrentTrackOff()
 	r.track.Refresh()
 	r.pill.FillColor = uitheme.Accent
+	r.pill.StrokeWidth = 0
+	if r.s.quiet {
+		r.pill.FillColor = theme.Color(theme.ColorNameInputBackground)
+		r.pill.StrokeColor = theme.Color(theme.ColorNameSeparator)
+		r.pill.StrokeWidth = 1
+	}
 	r.pill.Refresh()
 	for i, l := range r.labels {
-		if i == r.s.selected {
+		switch {
+		case i == r.s.selected && r.s.quiet:
+			l.Color = uitheme.CurrentForeground()
+		case i == r.s.selected:
 			l.Color = color.White
-		} else {
+		case r.s.quiet:
+			l.Color = uitheme.CurrentMuted()
+		default:
 			l.Color = uitheme.CurrentForeground()
 		}
 		l.Refresh()

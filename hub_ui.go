@@ -11,8 +11,10 @@ import (
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/lavluda/cd-switcher/internal/provider"
 	"github.com/lavluda/cd-switcher/internal/skills"
 	"github.com/lavluda/cd-switcher/internal/terminal"
+	"github.com/lavluda/cd-switcher/internal/uitheme"
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
 
@@ -33,13 +36,28 @@ func tabHeader(title, subtitle string, actions ...fyne.CanvasObject) fyne.Canvas
 	sub := widget.NewLabel(subtitle)
 	sub.Importance = widget.LowImportance
 	sub.Wrapping = fyne.TextWrapWord
-	head := fyne.CanvasObject(headingText(title))
+	// Inset by the label padding so the title lines up with the subtitle.
+	head := fyne.CanvasObject(container.New(layout.NewCustomPaddedLayout(0, 0, theme.InnerPadding(), 0), headingText(title)))
 	if len(actions) > 0 {
 		// Buttons sit beside the title, centred, so they keep their own
 		// height and the subtitle below gets the full width.
 		head = container.NewBorder(nil, nil, nil, container.NewCenter(container.NewHBox(actions...)), head)
 	}
 	return vbox(2, head, sub)
+}
+
+// titleSub is a list row's text: a bold title over a muted detail line,
+// set tight, without the padding two stacked labels would add.
+func titleSub(title, detail string) fyne.CanvasObject {
+	t := canvas.NewText(title, uitheme.CurrentForeground())
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	t.TextSize = 14
+	if detail == "" {
+		return container.New(layout.NewCustomPaddedLayout(6, 6, theme.InnerPadding(), 0), t)
+	}
+	d := canvas.NewText(detail, uitheme.CurrentMuted())
+	d.TextSize = 12
+	return container.New(layout.NewCustomPaddedLayout(6, 6, theme.InnerPadding(), 0), vbox(3, t, d))
 }
 
 // actionRow is a list row: text on the left, buttons on the right kept at
@@ -78,11 +96,33 @@ func (a *app) showForm(title, confirm string, items []*widget.FormItem, size fyn
 	if a.settingsWin == nil {
 		return
 	}
-	d := dialog.NewForm(title, confirm, "Cancel", items, func(ok bool) {
+	// Labels sit above their fields, so long field names never squeeze the
+	// inputs and every field gets the dialog's full width.
+	var fields []fyne.CanvasObject
+	for _, it := range items {
+		var parts []fyne.CanvasObject
+		if it.Text != "" {
+			l := canvas.NewText(it.Text, uitheme.CurrentForeground())
+			l.TextSize = 13
+			l.TextStyle = fyne.TextStyle{Bold: true}
+			parts = append(parts, container.New(layout.NewCustomPaddedLayout(0, 0, 2, 0), l))
+		}
+		parts = append(parts, it.Widget)
+		if it.HintText != "" {
+			parts = append(parts, lowLabel(it.HintText))
+		}
+		fields = append(fields, vbox(4, parts...))
+	}
+	body := container.New(layout.NewCustomPaddedLayout(4, 8, 4, 4), vbox(14, fields...))
+	d := dialog.NewCustomConfirm(title, confirm, "Cancel", container.NewVScroll(body), func(ok bool) {
 		if ok {
 			done()
 		}
 	}, a.settingsWin)
+	if size.Height == 0 {
+		// Tall enough for every field, scrolling only when the window is not.
+		size.Height = min(body.MinSize().Height+170, a.settingsWin.Canvas().Size().Height-60)
+	}
 	d.Resize(size)
 	d.Show()
 }
@@ -242,7 +282,6 @@ func (a *app) providersTabContent() fyne.CanvasObject {
 }
 
 func (a *app) providerRow(tool string, p provider.Provider, inUse bool) fyne.CanvasObject {
-	name := widget.NewLabelWithStyle(p.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	detail := p.BaseURL
 	if p.ID == "" {
 		detail = "Your own sign-in"
@@ -250,7 +289,7 @@ func (a *app) providerRow(tool string, p provider.Provider, inUse bool) fyne.Can
 	if p.Model != "" {
 		detail += " · " + p.Model
 	}
-	left := vbox(0, name, lowLabel(detail))
+	left := titleSub(p.Name, detail)
 	var right []fyne.CanvasObject
 	if inUse {
 		right = append(right, badge("In use"))
@@ -447,12 +486,11 @@ func (a *app) mcpTabContent() fyne.CanvasObject {
 }
 
 func (a *app) mcpCard(s mcp.Server, tools []string) fyne.CanvasObject {
-	name := widget.NewLabelWithStyle(s.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	what := strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
 	if s.Remote() {
 		what = s.URL
 	}
-	checks := container.NewGridWrap(fyne.NewSize(150, 36))
+	checks := container.NewGridWithColumns(3)
 	for _, t := range tools {
 		t := t
 		c := widget.NewCheck(harness.Title(t), nil)
@@ -465,7 +503,7 @@ func (a *app) mcpCard(s mcp.Server, tools []string) fyne.CanvasObject {
 		checks.Add(c)
 	}
 	srv := s
-	head := actionRow(vbox(0, name, lowLabel(what)),
+	head := actionRow(titleSub(s.Name, what),
 		iconButton(theme.DocumentCreateIcon(), func() { a.mcpForm(srv, srv.Name) }),
 		iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doMCPDelete(srv.Name) }) }),
 	)
@@ -644,8 +682,7 @@ func (a *app) skillsTabContent() fyne.CanvasObject {
 			right = append(right, iconButton(theme.ViewRefreshIcon(), func() { a.runOp(func() error { return a.doSkillUpdate(s.Name) }) }))
 		}
 		right = append(right, iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doSkillRemove(s.Name) }) }))
-		name := widget.NewLabelWithStyle(s.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		rows = append(rows, actionRow(vbox(0, name, lowLabel(where)), right...))
+		rows = append(rows, actionRow(titleSub(s.Name, where), right...))
 	}
 	if len(rows) > 0 {
 		items = append(items, group(rows...))
@@ -711,8 +748,7 @@ func (a *app) instructionsTabContent() fyne.CanvasObject {
 			iconButton(theme.DocumentCreateIcon(), func() { a.instructionsForm(e) }),
 			iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doInstrDelete(e.ID) }) }),
 		)
-		name := widget.NewLabelWithStyle(e.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		rows = append(rows, actionRow(vbox(0, name, lowLabel(preview)), right...))
+		rows = append(rows, actionRow(titleSub(e.Name, preview), right...))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, lowLabel("No instructions saved yet."))

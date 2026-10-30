@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ type settingsPage struct {
 func settingsPages() []settingsPage {
 	return []settingsPage{
 		{"", "General", theme.SettingsIcon(), (*app).generalTabContent},
+		{"", "Usage", chartIcon, (*app).usageTabContent},
 		{"Claude", "Accounts", theme.AccountIcon(), (*app).accountsTabContent},
 		{"Claude", "Switching", theme.ViewRefreshIcon(), (*app).manageProfilesTabContent},
 		{"Other tools", "Codex & Copilot", theme.ComputerIcon(), (*app).codexTabContent},
@@ -64,7 +66,7 @@ func (a *app) settingsContent() fyne.CanvasObject {
 	for i, pg := range pages {
 		if pg.section != section {
 			section = pg.section
-			nav = append(nav, container.New(layout.NewCustomPaddedLayout(10, 0, 8, 0), sectionCaption(section)))
+			nav = append(nav, navCaption(section))
 		}
 		i := i
 		b := widget.NewButtonWithIcon(pg.title, pg.icon, func() {
@@ -77,6 +79,10 @@ func (a *app) settingsContent() fyne.CanvasObject {
 		b.Importance = widget.LowImportance
 		if i == a.settingsTabIndex {
 			b.Importance = widget.MediumImportance
+		}
+		if pg.title == "Usage" {
+			nav = append(nav, a.usageNavItem(b))
+			continue
 		}
 		nav = append(nav, b)
 	}
@@ -333,14 +339,21 @@ func divider() fyne.CanvasObject {
 	return r
 }
 
-// sectionCaption is a small, muted, uppercase group label ("GENERAL",
-// "ACCOUNTS") in the style of a native grouped-settings list, replacing a
-// large bold heading that competed visually with the cards themselves.
+// sectionCaption heads a group of rows on a page, inset to line up with the
+// text inside the cards below it.
 func sectionCaption(text string) fyne.CanvasObject {
-	t := canvas.NewText(strings.ToUpper(text), uitheme.CurrentMuted())
+	t := canvas.NewText(text, uitheme.CurrentForeground())
 	t.TextStyle = fyne.TextStyle{Bold: true}
-	t.TextSize = 11
-	return container.New(layout.NewCustomPaddedLayout(2, 2, 0, 0), t)
+	t.TextSize = 14
+	return container.New(layout.NewCustomPaddedLayout(8, 0, theme.InnerPadding(), 0), t)
+}
+
+// navCaption names a group of pages in the Settings sidebar.
+func navCaption(text string) fyne.CanvasObject {
+	t := canvas.NewText(text, uitheme.CurrentMuted())
+	t.TextStyle = fyne.TextStyle{Bold: true}
+	t.TextSize = 12
+	return container.New(layout.NewCustomPaddedLayout(10, 0, 8, 0), t)
 }
 
 // accountCard is one account: name and plan, limit meters, spend, the recent
@@ -359,39 +372,31 @@ func (a *app) accountCard(p profile.Profile, colorIdx int, active, parallel, mos
 		}
 	}
 
-	name := widget.NewLabelWithStyle(p.Label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	meta := container.NewHBox()
+	// The name and its badges share one line; plan details go under it.
+	head := container.NewHBox(widget.NewLabelWithStyle(p.Label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 	if parallel && windowOpen {
-		meta.Add(badge("Open"))
+		head.Add(badge("Open"))
 	} else if !parallel && active {
-		meta.Add(badge("Active"))
+		head.Add(badge("Active"))
 	}
 	if mostRoom {
-		meta.Add(badge("Most room"))
+		head.Add(badge("Most room"))
 	}
 
 	a.statsMu.Lock()
 	e, ok := a.statsCache[id]
 	a.statsMu.Unlock()
 
-	var body []fyne.CanvasObject
-	body = append(body, name)
-	if len(meta.Objects) > 0 || (ok && e.plan != "") {
-		if ok && e.plan != "" {
-			plan := e.plan
-			if e.tier != "" {
-				plan += " · " + e.tier
-			}
-			if e.email != "" && !strings.EqualFold(e.email, p.Label) {
-				plan = e.email + " · " + plan
-			}
-			planLabel := widget.NewLabel(plan)
-			planLabel.Importance = widget.LowImportance
-			meta.Add(planLabel)
+	body := []fyne.CanvasObject{head}
+	if ok && e.plan != "" {
+		plan := e.plan
+		if e.tier != "" {
+			plan += " · " + e.tier
 		}
-		if len(meta.Objects) > 0 {
-			body = append(body, meta)
+		if e.email != "" && !strings.EqualFold(e.email, p.Label) {
+			plan = e.email + " · " + plan
 		}
+		body = append(body, lowLabel(plan))
 	}
 
 	switch {
@@ -598,10 +603,12 @@ func (r *panelRenderer) Objects() []fyne.CanvasObject {
 
 func (r *panelRenderer) Destroy() {}
 
-// thinMeter is a short rounded utilization bar.
+// thinMeter is a short rounded utilization bar, in the accent color unless
+// fill is set.
 type thinMeter struct {
 	widget.BaseWidget
 	frac float32
+	fill color.Color
 }
 
 func newThinMeter(frac float32) *thinMeter {
@@ -616,12 +623,19 @@ func newThinMeter(frac float32) *thinMeter {
 	return m
 }
 
+func (m *thinMeter) fillColor() color.Color {
+	if m.fill != nil {
+		return m.fill
+	}
+	return uitheme.Accent
+}
+
 func (m *thinMeter) MinSize() fyne.Size { return fyne.NewSize(80, 6) }
 
 func (m *thinMeter) CreateRenderer() fyne.WidgetRenderer {
 	track := canvas.NewRectangle(uitheme.CurrentGridLine())
 	track.CornerRadius = 3
-	fill := canvas.NewRectangle(uitheme.Accent)
+	fill := canvas.NewRectangle(m.fillColor())
 	fill.CornerRadius = 3
 	return &thinMeterRenderer{meter: m, track: track, fill: fill}
 }
@@ -646,7 +660,7 @@ func (r *thinMeterRenderer) MinSize() fyne.Size { return r.meter.MinSize() }
 func (r *thinMeterRenderer) Refresh() {
 	r.track.FillColor = uitheme.CurrentGridLine()
 	r.track.Refresh()
-	r.fill.FillColor = uitheme.Accent
+	r.fill.FillColor = r.meter.fillColor()
 	r.fill.Refresh()
 }
 
