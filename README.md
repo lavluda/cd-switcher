@@ -66,10 +66,11 @@ or open, the account with the most session room left.
 
 ## Settings
 
-Three tabs.
+General, Manage Profiles and Accounts cover Claude Desktop; the tabs for the
+other tools are described under [Other AI tools](#other-ai-tools).
 
-**General** — switching mode, limit alerts, open at login (macOS), and
-automatic update checks. Limit alerts notify you once when a session or
+**General** — switching mode, limit alerts, open at login (macOS), automatic
+update checks, the terminal app, and export/import. Limit alerts notify you once when a session or
 weekly limit reaches 80% (or 70% or 90%); the notice stays quiet until that
 window resets, or until usage falls back under the line. Choose Off to
 silence it.
@@ -80,13 +81,73 @@ silence it.
   the menu bar, with a ring around the active one, instead of a single app
   icon. Takes effect with more than one profile.
 - **Enable Auto-Switch** switches away from the active account the moment its
-  session usage reaches 100%, to whichever other profile has the most room
-  left. It fires once per limit window, and does nothing in side-by-side mode
-  (where every account is already open). Needs at least two profiles.
+  session usage reaches the chosen percent, to the account with the most room
+  left or, if you prefer, the one whose weekly limit resets soonest (so that
+  allowance is spent before it expires). "Skip in auto-switch" on an account
+  card keeps an account out of it. It fires once per limit window, does
+  nothing in side-by-side mode (where every account is already open), and
+  needs at least two profiles.
 
 **Accounts** — every captured account with its live plan meters, a chart of
 the last day of session usage on a 0-100% axis, and the switch, reorder,
 rename, and remove actions.
+
+## Other AI tools
+
+CD-Switcher also looks after the command-line tools you use next to Claude
+Desktop. Each one has a tab in Settings.
+
+**Claude Code login.** "Switch Claude Code login too" (Manage Profiles) gives
+each account its own CLI login. Only the account keys move; MCP sign-ins and
+plugin secrets stay put. The switch waits for Claude Code's own locks, so it
+never races a token refresh. Quit open `claude` sessions before switching.
+
+**Claude Code limits.** "Read limits from Claude Code" (Manage Profiles) makes
+CD-Switcher Claude Code's statusline command. Claude Code reports each
+account's session and weekly limits there after every reply; CD-Switcher
+records them and then runs the statusline you already had, so nothing
+changes on screen. Meters then stay current without polling Anthropic.
+
+**Codex & Copilot.** Save the Codex login you use now, or sign in to another
+ChatGPT account (Codex opens your browser). Switching swaps
+`~/.codex/auth.json` under Codex's own lock; restart running `codex` sessions
+afterwards. Each account shows its session and weekly limits, and
+auto-switch moves Codex to the account with the most room too. When a GitHub
+Copilot editor plugin is signed in on this Mac, its premium-request
+allowance shows up as well.
+
+**Providers.** Point Claude Code or Codex at another model API: OpenRouter,
+Bedrock, Vertex, a local Ollama, LM Studio, llama.cpp or vLLM server, or any
+compatible endpoint. Only the endpoint, key and model settings change, in
+`~/.claude/settings.json` (Claude Code picks this up live) or
+`~/.codex/config.toml` (next Codex start). Switching back to Official puts
+back what was there before. The tab also lists shell variables such as
+`ANTHROPIC_BASE_URL` that would override the choice, with a button to comment
+the line out, and four Claude Code switches: hide Claude attribution, tool
+search, auto-update, and the artifact tool.
+
+**MCP.** One list of MCP servers, written into Claude Code, Claude Desktop,
+Codex, Cursor, OpenCode and Gemini CLI in each one's own format. On first
+start CD-Switcher reads in the servers those tools already have. Tick a tool
+to add a server there; untick to remove it. An entry is rewritten only when
+you edit it, so tool-specific options in it survive.
+
+**Skills.** Install skills from a GitHub path (for example
+`anthropics/skills/skills/pdf`) or a zip. They go to `~/.agents/skills`,
+which Codex, Gemini CLI, Cursor, OpenCode and Qwen Code read, and are linked
+into `~/.claude/skills` for Claude Code. "Share with every tool" does the same
+for a skill that only Claude Code had.
+
+**Instructions.** One set of global instructions written to `CLAUDE.md`,
+`AGENTS.md`, `GEMINI.md` and `QWEN.md` for the tools you tick. Your existing
+files are read in on first start; nothing is written until you choose Use.
+
+**Terminal and links.** "Open Claude Code" and "Open Codex" in the menu start
+the CLI in your terminal app (General). Export writes providers, MCP servers,
+skills and instructions to a file for another Mac; accounts and API keys are
+never exported. On macOS, `cdswitcher://v1/import?resource=provider|mcp|skill`
+links add a provider, MCP servers or a skill after you confirm what they
+contain.
 
 ## Usage
 
@@ -149,6 +210,15 @@ A Windows build needs [fyne-cross](https://github.com/fyne-io/fyne-cross) or a
 Windows host with a C toolchain. `make windows` only prints that command.
 
 ## Safety notes
+
+- Every file CD-Switcher edits for another tool is parsed first and left
+  alone if it does not parse. Only the keys it was asked to change are
+  written; key order, comments in TOML, and symlinked dotfiles are kept. The
+  first time it changes a file, the original is copied to
+  `<user-config-dir>/cd-switcher/backups/first-write/`.
+- Provider API keys are kept in an owner-only file next to the config, and
+  written owner-only into the tool's own settings when that provider is in
+  use.
 
 - Claude must be **fully quit** before any swap; the app waits, escalates once,
   and aborts without touching files if it can't exit.

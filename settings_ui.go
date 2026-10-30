@@ -19,6 +19,7 @@ import (
 	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/login"
 	"github.com/lavluda/cd-switcher/internal/profile"
+	"github.com/lavluda/cd-switcher/internal/ratelimits"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
@@ -35,8 +36,13 @@ func (a *app) settingsContent() fyne.CanvasObject {
 	general := container.NewTabItemWithIcon("General", theme.SettingsIcon(), a.generalTabContent())
 	profiles := container.NewTabItemWithIcon("Manage Profiles", theme.AccountIcon(), a.manageProfilesTabContent())
 	accounts := container.NewTabItemWithIcon("Accounts", theme.ListIcon(), a.accountsTabContent())
+	codexTab := container.NewTabItemWithIcon("Codex & Copilot", theme.ComputerIcon(), a.codexTabContent())
+	providers := container.NewTabItemWithIcon("Providers", theme.StorageIcon(), a.providersTabContent())
+	mcpTab := container.NewTabItemWithIcon("MCP", theme.GridIcon(), a.mcpTabContent())
+	skillsTab := container.NewTabItemWithIcon("Skills", theme.FolderIcon(), a.skillsTabContent())
+	instr := container.NewTabItemWithIcon("Instructions", theme.DocumentIcon(), a.instructionsTabContent())
 
-	tabs := container.NewAppTabs(general, profiles, accounts)
+	tabs := container.NewAppTabs(general, profiles, accounts, codexTab, providers, mcpTab, skillsTab, instr)
 	tabs.SetTabLocation(container.TabLocationLeading)
 	tabs.OnSelected = func(*container.TabItem) { a.settingsTabIndex = tabs.SelectedIndex() }
 	tabs.SelectIndex(a.settingsTabIndex)
@@ -54,6 +60,7 @@ func (a *app) generalTabContent() fyne.CanvasObject {
 	launchAtLogin := a.cfg.LaunchAtLogin
 	warnAt := a.cfg.WarnPercent()
 	autoCheckUpdates := a.cfg.AutoCheckUpdatesEnabled()
+	term := a.cfg.Terminal
 	a.mu.Unlock()
 
 	title := headingText("General")
@@ -70,6 +77,7 @@ func (a *app) generalTabContent() fyne.CanvasObject {
 		autoCheckUpdates, true,
 		func(checked bool) { a.runOp(func() error { return a.doSetAutoCheckUpdates(checked) }) },
 	))
+	rows = append(rows, a.terminalRow(term), a.exportRow())
 
 	body := vbox(10, vbox(2, title, sub), group(rows...))
 	return container.NewVScroll(container.NewPadded(body))
@@ -85,13 +93,14 @@ func (a *app) manageProfilesTabContent() fyne.CanvasObject {
 	autoSwitch := a.cfg.AutoSwitchOnLimit
 	autoSwitchAt := a.cfg.AutoSwitchPercent()
 	switchCLI := a.cfg.SwitchCLI
+	strategy := a.cfg.AutoSwitchStrategy
 	a.mu.Unlock()
 
 	title := headingText("Manage Profiles")
 	sub := widget.NewLabel("Choose how multiple Claude accounts behave")
 	sub.Importance = widget.LowImportance
 
-	rows := []fyne.CanvasObject{a.multiProfileRow(showMultiple), a.autoSwitchRow(autoSwitch, autoSwitchAt, profileCount > 1)}
+	rows := []fyne.CanvasObject{a.multiProfileRow(showMultiple), a.autoSwitchRow(autoSwitch, autoSwitchAt, profileCount > 1), a.strategyRow(strategy, profileCount > 1)}
 	if clicreds.Supported() {
 		rows = append(rows, toggleRow(
 			"Switch Claude Code login too",
@@ -100,6 +109,7 @@ func (a *app) manageProfilesTabContent() fyne.CanvasObject {
 			func(checked bool) { a.runOp(func() error { return a.doSetSwitchCLI(checked) }) },
 		))
 	}
+	rows = append(rows, a.statuslineRow(ratelimits.Installed()))
 	display := group(rows...)
 
 	body := vbox(10, vbox(2, title, sub), display)
@@ -352,6 +362,9 @@ func (a *app) accountCard(p profile.Profile, colorIdx int, active, parallel, mos
 			if e.tier != "" {
 				plan += " · " + e.tier
 			}
+			if e.email != "" && !strings.EqualFold(e.email, p.Label) {
+				plan = e.email + " · " + plan
+			}
 			planLabel := widget.NewLabel(plan)
 			planLabel.Importance = widget.LowImportance
 			meta.Add(planLabel)
@@ -366,6 +379,9 @@ func (a *app) accountCard(p profile.Profile, colorIdx int, active, parallel, mos
 		status := widget.NewLabel("Updated " + e.fetchedAt.Local().Format("3:04pm"))
 		if e.err != nil {
 			status.SetText("Last reading " + e.fetchedAt.Local().Format("3:04pm"))
+		}
+		if e.fromClaudeCode {
+			status.SetText(status.Text + " · from Claude Code")
 		}
 		status.Importance = widget.LowImportance
 		body = append(body, status)
@@ -412,7 +428,11 @@ func (a *app) accountCard(p profile.Profile, colorIdx int, active, parallel, mos
 		}
 	}
 
-	body = append(body, a.accountActions(id, colorIdx, active, parallel, windowOpen, first, last))
+	skip := widget.NewCheck("Skip in auto-switch", func(on bool) {
+		a.runOp(func() error { return a.doSetNoAutoSwitch(id, on) })
+	})
+	skip.Checked = p.NoAutoSwitch
+	body = append(body, skip, a.accountActions(id, colorIdx, active, parallel, windowOpen, first, last))
 	return newPanel(vbox(6, body...))
 }
 

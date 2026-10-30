@@ -43,3 +43,29 @@ func TestFreestWeeklyCanBeTheBindingLimit(t *testing.T) {
 		t.Fatalf("Freest = %q; want busy-session", got.ID)
 	}
 }
+
+func TestConsumeFirstSpendsSoonestWeeklyReset(t *testing.T) {
+	loads := []AccountLoad{
+		{ID: "busy", Session: 99, WeekResetsIn: time.Hour, Ready: true}, // over the cap
+		{ID: "late", Session: 10, WeekResetsIn: 72 * time.Hour, Ready: true},
+		{ID: "soon", Session: 50, Week: 60, WeekResetsIn: 6 * time.Hour, Ready: true},
+		{ID: "unknown", Session: 0, Ready: true},
+		{ID: "excluded", Session: 0, WeekResetsIn: time.Minute, Ready: false},
+	}
+	if got, ok := ConsumeFirst(loads, 90); !ok || got.ID != "soon" {
+		t.Fatalf("got %q", got.ID)
+	}
+	if got, ok := ConsumeFirst(loads[3:], 90); !ok || got.ID != "unknown" {
+		t.Fatalf("unknown reset should still be chosen when alone, got %q", got.ID)
+	}
+}
+
+func TestAccountFromCacheKey(t *testing.T) {
+	a, o := AccountFromCacheKey("11111111-2222-4333-8444-555555555555:66666666-7777-4888-9999-000000000000:https://api.anthropic.com:user:inference")
+	if a != "11111111-2222-4333-8444-555555555555" || o != "66666666-7777-4888-9999-000000000000" {
+		t.Fatalf("got %q %q", a, o)
+	}
+	if a, o := AccountFromCacheKey("https://api.anthropic.com:user:inference"); a != "" || o != "" {
+		t.Fatal("parsed a key without UUIDs")
+	}
+}

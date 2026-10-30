@@ -1,8 +1,8 @@
 name: CI
 
-# Vets and tests every push and pull request. macOS runners build Fyne's cgo
-# code with no extra packages, and the Keychain, codesign and hdiutil tests
-# can only run there.
+# Vets and tests every push and pull request on each OS a release is built
+# for. The Keychain, codesign and hdiutil tests only run on macOS; the rest
+# runs everywhere so a Linux or Windows break shows up before a tag.
 on:
   push:
     branches: ["main"]
@@ -13,12 +13,23 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           check-latest: true
+      # Same packages the release build installs: Fyne needs OpenGL and X11
+      # headers on Linux, and the tray uses libayatana-appindicator.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev libxkbcommon-dev libayatana-appindicator3-dev
       - run: go vet ./...
       - run: go test ./...

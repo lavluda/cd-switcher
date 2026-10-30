@@ -16,7 +16,10 @@ type AccountLoad struct {
 	Session  float64
 	Week     float64
 	ResetsIn time.Duration
-	Ready    bool
+	// WeekResetsIn is how long until the weekly window resets; zero means
+	// unknown.
+	WeekResetsIn time.Duration
+	Ready        bool
 }
 
 // score is how constrained the account is: the weekly figure, or the session
@@ -45,4 +48,49 @@ func Freest(loads []AccountLoad) (AccountLoad, bool) {
 		}
 	}
 	return best, found
+}
+
+// ConsumeFirst returns the ready account whose weekly window resets soonest
+// among those whose session is under sessionCap, so allowance that would
+// expire unused gets spent first. Accounts with no known weekly reset come
+// last; ties fall back to Freest's order.
+func ConsumeFirst(loads []AccountLoad, sessionCap float64) (AccountLoad, bool) {
+	var best AccountLoad
+	found := false
+	for _, l := range loads {
+		if !l.Ready || l.Session >= sessionCap || l.Week >= 100 {
+			continue
+		}
+		if !found || sooner(l, best) {
+			best, found = l, true
+		}
+	}
+	return best, found
+}
+
+func sooner(a, b AccountLoad) bool {
+	switch {
+	case a.WeekResetsIn > 0 && b.WeekResetsIn <= 0:
+		return true
+	case a.WeekResetsIn <= 0 && b.WeekResetsIn > 0:
+		return false
+	case a.WeekResetsIn != b.WeekResetsIn:
+		return a.WeekResetsIn < b.WeekResetsIn
+	}
+	return a.score() < b.score()
+}
+
+// WithWindows returns s with the session and weekly windows replaced, for a
+// reading that came from somewhere other than the usage API (Claude Code's
+// statusline). A window that is not present keeps its old value.
+func (s Stats) WithWindows(session float64, sessionReset time.Time, haveSession bool, week float64, weekReset time.Time, haveWeek bool) Stats {
+	if haveSession {
+		s.FiveHour.Utilization = session
+		s.FiveHour.ResetsAt = sessionReset
+	}
+	if haveWeek {
+		s.SevenDay.Utilization = week
+		s.SevenDay.ResetsAt = weekReset
+	}
+	return s
 }

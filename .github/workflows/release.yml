@@ -136,6 +136,10 @@ jobs:
             <key>CFBundleVersion</key><string>${{ github.event.inputs.tag || github.ref_name }}</string>
             <key>LSMinimumSystemVersion</key><string>11.0</string>
             <key>LSUIElement</key><true/>
+            <key>CFBundleURLTypes</key><array><dict>
+              <key>CFBundleURLName</key><string>com.lavluda.cd-switcher</string>
+              <key>CFBundleURLSchemes</key><array><string>cdswitcher</string></array>
+            </dict></array>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
