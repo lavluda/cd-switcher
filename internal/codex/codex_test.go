@@ -100,3 +100,40 @@ func TestUsageRefreshesSavedLoginAndClassifiesWindows(t *testing.T) {
 		t.Fatalf("rotated tokens not saved, or other keys lost:\n%s", b)
 	}
 }
+
+func TestKeyringLogin(t *testing.T) {
+	h := t.TempDir()
+	old := harness.Home
+	harness.Home = func() string { return h }
+	t.Cleanup(func() { harness.Home = old })
+	t.Setenv("CODEX_HOME", "")
+	items := map[string]string{}
+	oldR, oldW := kcRead, kcWrite
+	t.Cleanup(func() { kcRead, kcWrite = oldR, oldW })
+	kcRead = func(s, a string) (string, bool, error) { v, ok := items[s+"/"+a]; return v, ok, nil }
+	kcWrite = func(s, a, d string) error { items[s+"/"+a] = d; return nil }
+
+	os.MkdirAll(harness.CodexHome(), 0o700)
+	os.WriteFile(filepath.Join(harness.CodexHome(), "config.toml"), []byte("cli_auth_credentials_store = \"keyring\" # mine\n"), 0o600)
+	saved := filepath.Join(h, "saved.json")
+	writeAuth(t, saved, "x")
+	writeAuth(t, LivePath(), "stale")
+	if err := UseLogin(saved); err != nil {
+		t.Fatal(err)
+	}
+	key := keyringService + "/" + keyringKey(harness.CodexHome())
+	if !strings.HasPrefix(key, "Codex Auth/cli|") || len(key) != len("Codex Auth/cli|")+16 || !strings.Contains(items[key], `"account_id":"acc-1"`) {
+		t.Fatalf("keychain items = %v", items)
+	}
+	if _, err := os.Stat(LivePath()); !os.IsNotExist(err) {
+		t.Fatal("stale auth.json left beside the keychain login")
+	}
+	p, cleanup, err := LiveFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if id, err := ReadIdentity(p); err != nil || id.Email != "a@x" {
+		t.Fatalf("live identity = %+v, %v", id, err)
+	}
+}

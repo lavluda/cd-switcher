@@ -117,11 +117,16 @@ func (a *app) codexImport(src string, ident codex.Identity) (string, error) {
 
 // doCodexAddCurrent saves the login Codex is using now and marks it active.
 func (a *app) doCodexAddCurrent() error {
-	ident, err := codex.ReadIdentity(codex.LivePath())
+	live, cleanup, err := codex.LiveFile()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	ident, err := codex.ReadIdentity(live)
 	if err != nil {
 		return fmt.Errorf("Codex is not signed in on this Mac (%v). Run codex login first, or use Sign in to another account", err)
 	}
-	id, err := a.codexImport(codex.LivePath(), ident)
+	id, err := a.codexImport(live, ident)
 	if err != nil {
 		return err
 	}
@@ -159,7 +164,7 @@ func (a *app) startCodexLogin() {
 			}
 			if a.cfg.ActiveCodex == "" {
 				// Nothing was active: this becomes the live login.
-				if err := codex.Copy(a.codexSavedPath(id), codex.LivePath()); err != nil {
+				if err := codex.UseLogin(a.codexSavedPath(id)); err != nil {
 					return err
 				}
 				a.cfg.ActiveCodex = id
@@ -182,15 +187,19 @@ func (a *app) doCodexSwitch(id string) error {
 	if id == a.cfg.ActiveCodex {
 		return nil
 	}
-	live := codex.LivePath()
+	live, cleanup, err := codex.LiveFile()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	if ident, err := codex.ReadIdentity(live); err == nil {
-		// Whoever is signed in now is saved before the file is replaced: the
-		// active account, or a login made by hand with codex login.
+		// Whoever is signed in now is saved before the login is replaced:
+		// the active account, or a login made by hand with codex login.
 		if _, err := a.codexImport(live, ident); err != nil {
 			return fmt.Errorf("save the current Codex login first: %w", err)
 		}
 	}
-	if err := codex.Copy(a.codexSavedPath(id), live); err != nil {
+	if err := codex.UseLogin(a.codexSavedPath(id)); err != nil {
 		return err
 	}
 	a.cfg.ActiveCodex = id
@@ -260,15 +269,21 @@ func (a *app) refreshOtherQuotas(minAge time.Duration) {
 		if time.Since(prev.fetchedAt) < minAge && prev.err == nil {
 			continue
 		}
-		path, canRefresh := a.codexSavedPath(acct.ID), true
+		path, canRefresh, cleanup := a.codexSavedPath(acct.ID), true, func() {}
 		if acct.ID == active {
 			// Codex keeps the live login fresh itself; refreshing it here
 			// would spend a refresh token Codex still holds.
-			path, canRefresh = codex.LivePath(), false
+			live, done, err := codex.LiveFile()
+			if err != nil {
+				logf("codex usage for %q: %v", acct.Label, err)
+				continue
+			}
+			path, canRefresh, cleanup = live, false, done
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		q, err := codex.Usage(ctx, path, canRefresh)
 		cancel()
+		cleanup()
 		next := codexEntry{quota: q, fetchedAt: time.Now(), err: err}
 		if err != nil {
 			logf("codex usage for %q: %v", acct.Label, err)
@@ -660,6 +675,26 @@ func (a *app) doSkillInstallZip() error {
 			return err
 		}
 		names, err = skills.InstallZip(path)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	a.recordSkills(names, "")
+	_ = zenity.Notify("Installed skills: " + strings.Join(names, ", "))
+	return a.store.Save(a.cfg)
+}
+
+// doSkillInstallFolder copies a local skill folder (or a folder of skills)
+// into the shared folder.
+func (a *app) doSkillInstallFolder() error {
+	var names []string
+	err := a.unlocked(func() error {
+		path, err := zenity.SelectFile(zenity.Title("Install skills from a folder"), zenity.Directory())
+		if err != nil {
+			return err
+		}
+		names, err = skills.InstallDir(path)
 		return err
 	})
 	if err != nil {

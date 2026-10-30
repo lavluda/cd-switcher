@@ -161,6 +161,13 @@ func main() {
 		}
 		return
 	}
+	// On Linux and Windows a clicked link starts a new process; hand it to
+	// the running app instead of opening a second tray.
+	if link := linkArg(); link != "" {
+		if store, err := profile.NewStore(); err == nil && urlevent.Forward(store.Root(), link) {
+			return
+		}
+	}
 	a.fyneApp = fyneapp.New()
 	// Restyles the Settings window only — the system tray menu and zenity
 	// dialogs are native OS chrome and don't go through Fyne's theme.
@@ -193,6 +200,7 @@ func (a *app) setup() {
 	a.store = store
 	initLog(store.Root())
 	cfgfile.BackupDir = filepath.Join(store.Root(), "backups", "first-write")
+	clicreds.StoreDir = store.Root()
 
 	a.normalIcon = fyne.NewStaticResource("cd-switcher", icon.Data())
 	a.restIcon = a.normalIcon
@@ -261,16 +269,30 @@ func (a *app) setup() {
 		}
 		return a.loadInstructionsOnce()
 	})
-	go func() {
-		for _, arg := range os.Args[1:] {
-			if strings.HasPrefix(arg, deeplink.Scheme+"://") {
-				a.handleLink(arg)
-			}
+	if exe, err := os.Executable(); err == nil {
+		if err := urlevent.Register(exe); err != nil {
+			logf("register %s:// links: %v", deeplink.Scheme, err)
 		}
-		for link := range urlevent.Listen() {
+	}
+	links := urlevent.Listen(store.Root())
+	go func() {
+		if link := linkArg(); link != "" {
+			a.handleLink(link)
+		}
+		for link := range links {
 			a.handleLink(link)
 		}
 	}()
+}
+
+// linkArg is a cdswitcher:// link passed on the command line, if any.
+func linkArg() string {
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, deeplink.Scheme+"://") {
+			return arg
+		}
+	}
+	return ""
 }
 
 // buildAndSetMenu rebuilds the tray menu from current state and installs it.

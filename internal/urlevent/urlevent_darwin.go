@@ -24,9 +24,16 @@ func goHandleURL(u *C.char) {
 // Registered at start-up so a link that launches the app is not missed.
 func init() { C.cdsRegisterURLHandler() }
 
+// Forward is for platforms that start a new process per link; macOS hands
+// links to the running app itself.
+func Forward(stateDir, link string) bool { return false }
+
+// Register is done by the bundle's Info.plist on macOS.
+func Register(exe string) error { return nil }
+
 // Listen registers the handler again (AppKit may install its own while it
 // finishes launching) and returns the links as they arrive.
-func Listen() <-chan string {
+func Listen(stateDir string) <-chan string {
 	C.cdsRegisterURLHandler()
 	return urls
 }

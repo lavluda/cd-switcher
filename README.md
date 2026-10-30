@@ -97,12 +97,13 @@ rename, and remove actions.
 CD-Switcher also looks after the command-line tools you use next to Claude
 Desktop. Each one has a tab in Settings.
 
-**Claude Code login.** "Switch Claude Code login too" (Manage Profiles) gives
-each account its own CLI login. Only the account keys move; MCP sign-ins and
-plugin secrets stay put. The switch waits for Claude Code's own locks, so it
+**Claude Code login.** "Switch Claude Code login too" (Switching) gives
+each account its own CLI login: the Keychain item on macOS,
+`~/.claude/.credentials.json` on Linux and Windows. Only the account keys
+move; MCP sign-ins and plugin secrets stay put. The switch waits for Claude Code's own locks, so it
 never races a token refresh. Quit open `claude` sessions before switching.
 
-**Claude Code limits.** "Read limits from Claude Code" (Manage Profiles) makes
+**Claude Code limits.** "Read limits from Claude Code" (Switching) makes
 CD-Switcher Claude Code's statusline command. Claude Code reports each
 account's session and weekly limits there after every reply; CD-Switcher
 records them and then runs the statusline you already had, so nothing
@@ -110,14 +111,15 @@ changes on screen. Meters then stay current without polling Anthropic.
 
 **Codex & Copilot.** Save the Codex login you use now, or sign in to another
 ChatGPT account (Codex opens your browser). Switching swaps
-`~/.codex/auth.json` under Codex's own lock; restart running `codex` sessions
+`~/.codex/auth.json` under Codex's own lock, or the Keychain item when Codex
+is set to keep its login there; restart running `codex` sessions
 afterwards. Each account shows its session and weekly limits, and
 auto-switch moves Codex to the account with the most room too. When a GitHub
 Copilot editor plugin is signed in on this Mac, its premium-request
 allowance shows up as well.
 
 **Providers.** Point Claude Code or Codex at another model API: OpenRouter,
-Bedrock, Vertex, a local Ollama, LM Studio, llama.cpp or vLLM server, or any
+Bedrock, Vertex, Microsoft Foundry, a local Ollama, LM Studio, llama.cpp or vLLM server, or any
 compatible endpoint. Only the endpoint, key and model settings change, in
 `~/.claude/settings.json` (Claude Code picks this up live) or
 `~/.codex/config.toml` (next Codex start). Switching back to Official puts
@@ -133,7 +135,7 @@ to add a server there; untick to remove it. An entry is rewritten only when
 you edit it, so tool-specific options in it survive.
 
 **Skills.** Install skills from a GitHub path (for example
-`anthropics/skills/skills/pdf`) or a zip. They go to `~/.agents/skills`,
+`anthropics/skills/skills/pdf`), a zip or a local folder. They go to `~/.agents/skills`,
 which Codex, Gemini CLI, Cursor, OpenCode and Qwen Code read, and are linked
 into `~/.claude/skills` for Claude Code. "Share with every tool" does the same
 for a skill that only Claude Code had.
@@ -145,9 +147,10 @@ files are read in on first start; nothing is written until you choose Use.
 **Terminal and links.** "Open Claude Code" and "Open Codex" in the menu start
 the CLI in your terminal app (General). Export writes providers, MCP servers,
 skills and instructions to a file for another Mac; accounts and API keys are
-never exported. On macOS, `cdswitcher://v1/import?resource=provider|mcp|skill`
-links add a provider, MCP servers or a skill after you confirm what they
-contain.
+never exported. `cdswitcher://v1/import?resource=provider|mcp|skill` links
+add a provider, MCP servers or a skill after you confirm what they contain.
+On Linux and Windows the app registers the link type for your user when it
+starts.
 
 ## Usage
 

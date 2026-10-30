@@ -295,6 +295,10 @@ func InstallZip(zipPath string) ([]string, error) {
 	return installFrom(tmp)
 }
 
+// InstallDir copies the skill at dir, or every skill below it, into the
+// shared folder. The source folder is left as it is.
+func InstallDir(dir string) ([]string, error) { return installFrom(dir) }
+
 // extract writes one archive member under root, refusing any path that would
 // land outside it.
 func extract(root, name string, r io.Reader, mode fs.FileMode) error {

@@ -4,13 +4,15 @@ go 1.26
 
 require (
 	fyne.io/fyne/v2 v2.7.4
+	github.com/BurntSushi/toml v1.5.0
 	github.com/ncruces/zenity v0.10.4
 	github.com/shirou/gopsutil/v3 v3.24.5
+	golang.org/x/crypto v0.54.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
 	fyne.io/systray v1.12.1 // indirect
-	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/akavel/rsrc v0.10.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dchest/jsmin v0.0.0-20220218165748-59f39799265f // indirect
@@ -49,10 +51,8 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

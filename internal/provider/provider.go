@@ -34,7 +34,8 @@ type Provider struct {
 	BaseURL string `json:"baseUrl,omitempty"`
 	Model   string `json:"model,omitempty"`
 	// KeyVar is the Claude Code variable that carries the key:
-	// ANTHROPIC_AUTH_TOKEN (Bearer) or ANTHROPIC_API_KEY (x-api-key).
+	// ANTHROPIC_AUTH_TOKEN (Bearer), ANTHROPIC_API_KEY (x-api-key) or
+	// ANTHROPIC_FOUNDRY_API_KEY.
 	KeyVar string `json:"keyVar,omitempty"`
 	// Env holds extra Claude Code variables, such as the Bedrock switch or the
 	// per-tier model names.
@@ -52,6 +53,7 @@ var claudeKeys = []string{
 	"ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_CUSTOM_HEADERS",
 	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
 	"AWS_REGION", "AWS_PROFILE", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID",
+	"ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
 }
 
 // codexTable is the one model provider table CD-Switcher owns in config.toml.

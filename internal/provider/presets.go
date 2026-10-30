@@ -9,6 +9,7 @@ var Presets = []Provider{
 	{Name: "Anthropic API key", Harness: harness.Claude, BaseURL: "https://api.anthropic.com", KeyVar: "ANTHROPIC_API_KEY"},
 	{Name: "OpenRouter", Harness: harness.Claude, BaseURL: "https://openrouter.ai/api", KeyVar: "ANTHROPIC_AUTH_TOKEN", Env: map[string]string{"ANTHROPIC_API_KEY": ""}},
 	{Name: "Amazon Bedrock", Harness: harness.Claude, Env: map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1"}},
+	{Name: "Microsoft Foundry", Harness: harness.Claude, KeyVar: "ANTHROPIC_FOUNDRY_API_KEY", Env: map[string]string{"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": ""}},
 	{Name: "Google Vertex AI", Harness: harness.Claude, Env: map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "us-east5", "ANTHROPIC_VERTEX_PROJECT_ID": ""}},
 	{Name: "Ollama", Harness: harness.Claude, BaseURL: "http://localhost:11434", KeyVar: "ANTHROPIC_AUTH_TOKEN"},
 	{Name: "LM Studio", Harness: harness.Claude, BaseURL: "http://localhost:1234", KeyVar: "ANTHROPIC_AUTH_TOKEN"},

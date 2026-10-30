@@ -1,8 +1,7 @@
-//go:build darwin
-
 // Package clicreds lets each CD-Switcher account remember its own Claude Code
-// (CLI) login. Claude Code keeps its OAuth login in one macOS Keychain item and
-// the matching profile under "oauthAccount" in ~/.claude.json. Save copies the
+// (CLI) login. Claude Code keeps its OAuth login in one macOS Keychain item
+// (on Linux and Windows, in ~/.claude/.credentials.json) and the matching
+// profile under "oauthAccount" in ~/.claude.json. Save copies the
 // account's part of both into an item of our own; Restore puts an account's
 // copy back, so the CLI follows the account that is switched to.
 //
@@ -13,14 +12,11 @@
 package clicreds
 
 import (
-	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -73,9 +69,6 @@ const journalName = "cli-switch.journal"
 
 // home is swapped in tests.
 var home = os.UserHomeDir
-
-// Supported reports whether this platform can swap the CLI login.
-func Supported() bool { return true }
 
 func storedService(id string) string { return "CD-Switcher CLI " + id }
 
@@ -342,68 +335,68 @@ func keychainAccount() string {
 	return u
 }
 
-// Keychain access goes through these so tests can use a fake store.
-var (
-	read   = keychainRead
-	write  = keychainWrite
-	remove = keychainRemove
-)
+// StoreDir holds each account's saved CLI login where Claude Code keeps its
+// login in a file rather than the macOS Keychain. Set once at startup.
+var StoreDir string
 
-// keychainRead returns the password data of the generic-password item for
-// service, matching on account too when one is given.
-func keychainRead(service, account string) (string, bool, error) {
-	args := []string{"find-generic-password", "-s", service, "-w"}
-	if account != "" {
-		args = append(args, "-a", account)
-	}
-	var stderr bytes.Buffer
-	cmd := exec.Command("/usr/bin/security", args...)
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if strings.Contains(stderr.String(), "could not be found") {
-			return "", false, nil
+// The file store stands in for the Keychain on Linux and Windows: the live
+// "item" is Claude Code's credentials file, an account's is a file of ours.
+func fileFor(service string) (string, error) {
+	if service == liveService {
+		h, err := home()
+		if err != nil {
+			return "", err
 		}
-		return "", false, fmt.Errorf("read keychain %q: %v: %s", service, err, strings.TrimSpace(stderr.String()))
+		return filepath.Join(h, ".claude", ".credentials.json"), nil
 	}
-	return strings.TrimSuffix(string(out), "\n"), true, nil
+	if StoreDir == "" {
+		return "", errors.New("clicreds: StoreDir not set")
+	}
+	return filepath.Join(StoreDir, "cli-logins", strings.TrimPrefix(service, storedService(""))+".json"), nil
 }
 
-// keychainWrite sets the item's data, then reads it back to confirm it landed
-// intact. Data goes to `security -i` on stdin so it stays out of the process
-// list, but that mode silently truncates lines past ~4 KB, so a longer value
-// falls back to an argument; the read-back catches any corruption either way.
-func keychainWrite(service, account, data string) error {
-	h := hex.EncodeToString([]byte(data))
-	var cmd *exec.Cmd
-	if len(h) <= 3500 {
-		cmd = exec.Command("/usr/bin/security", "-i")
-		cmd.Stdin = strings.NewReader(fmt.Sprintf("add-generic-password -U -s %q -a %q -X %s\n", service, account, h))
-	} else {
-		cmd = exec.Command("/usr/bin/security", "add-generic-password", "-U", "-s", service, "-a", account, "-X", h)
+func fileRead(service, _ string) (string, bool, error) {
+	p, err := fileFor(service)
+	if err != nil {
+		return "", false, err
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("write keychain %q: %v: %s", service, err, strings.TrimSpace(string(out)))
+	b, err := os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
 	}
-	got, found, err := keychainRead(service, account)
+	return string(b), err == nil, err
+}
+
+// fileWrite replaces the file atomically, owner-only, through any symlink.
+func fileWrite(service, _, data string) error {
+	p, err := fileFor(service)
 	if err != nil {
 		return err
 	}
-	if !found || got != data {
-		return errors.New("keychain write for " + service + " did not read back intact")
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	tmp := p + ".cdswitcher-tmp"
+	if err := os.WriteFile(tmp, []byte(data), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
 	return nil
 }
 
-// keychainRemove deletes the item; one that is already gone is not an error.
-func keychainRemove(service, account string) error {
-	args := []string{"delete-generic-password", "-s", service}
-	if account != "" {
-		args = append(args, "-a", account)
+func fileRemove(service, _ string) error {
+	p, err := fileFor(service)
+	if err != nil {
+		return err
 	}
-	out, err := exec.Command("/usr/bin/security", args...).CombinedOutput()
-	if err != nil && !strings.Contains(string(out), "could not be found") {
-		return fmt.Errorf("delete keychain %q: %v: %s", service, err, strings.TrimSpace(string(out)))
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	return nil
 }

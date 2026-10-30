@@ -2,8 +2,8 @@
 // account, swapped into $CODEX_HOME/auth.json on switch, plus each account's
 // usage limits from ChatGPT's backend.
 //
-// Only file-based logins are handled ("cli_auth_credentials_store" = file,
-// Codex's usual choice); a keyring-only login has no auth.json to swap.
+// The live login is auth.json by default, or a keychain item when Codex is
+// set to keep it there (see live.go).
 package codex
 
 import (

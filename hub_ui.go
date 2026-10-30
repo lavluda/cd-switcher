@@ -300,9 +300,30 @@ func envLines(m map[string]string) string {
 }
 
 const (
-	keyBearer = "Bearer token (ANTHROPIC_AUTH_TOKEN)"
-	keyAPIKey = "API key (ANTHROPIC_API_KEY)"
+	keyBearer  = "Bearer token (ANTHROPIC_AUTH_TOKEN)"
+	keyAPIKey  = "API key (ANTHROPIC_API_KEY)"
+	keyFoundry = "Foundry key (ANTHROPIC_FOUNDRY_API_KEY)"
 )
+
+// keyVarChoice and keyVarOf map the form's "Key sent as" choice to the
+// variable, in both directions.
+var keyVarChoice = map[string]string{"ANTHROPIC_AUTH_TOKEN": keyBearer, "ANTHROPIC_API_KEY": keyAPIKey, "ANTHROPIC_FOUNDRY_API_KEY": keyFoundry}
+
+func keyVarOf(choice string) string {
+	for v, c := range keyVarChoice {
+		if c == choice {
+			return v
+		}
+	}
+	return "ANTHROPIC_AUTH_TOKEN"
+}
+
+func keyChoiceOf(v string) string {
+	if c, ok := keyVarChoice[v]; ok {
+		return c
+	}
+	return keyBearer
+}
 
 func (a *app) providerForm(tool string, p provider.Provider) {
 	name := widget.NewEntry()
@@ -317,11 +338,8 @@ func (a *app) providerForm(tool string, p provider.Provider) {
 	if p.ID != "" {
 		key.SetPlaceHolder("Leave empty to keep the stored key")
 	}
-	keyVar := widget.NewSelect([]string{keyBearer, keyAPIKey}, nil)
-	keyVar.SetSelected(keyBearer)
-	if p.KeyVar == "ANTHROPIC_API_KEY" {
-		keyVar.SetSelected(keyAPIKey)
-	}
+	keyVar := widget.NewSelect([]string{keyBearer, keyAPIKey, keyFoundry}, nil)
+	keyVar.SetSelected(keyChoiceOf(p.KeyVar))
 	extra := widget.NewMultiLineEntry()
 	extra.SetText(envLines(p.Env))
 	extra.SetPlaceHolder("ANTHROPIC_DEFAULT_SONNET_MODEL=…")
@@ -343,11 +361,7 @@ func (a *app) providerForm(tool string, p provider.Provider) {
 				name.SetText(pr.Name)
 				base.SetText(pr.BaseURL)
 				extra.SetText(envLines(pr.Env))
-				if pr.KeyVar == "ANTHROPIC_API_KEY" {
-					keyVar.SetSelected(keyAPIKey)
-				} else {
-					keyVar.SetSelected(keyBearer)
-				}
+				keyVar.SetSelected(keyChoiceOf(pr.KeyVar))
 			}
 		}
 	})
@@ -382,10 +396,7 @@ func (a *app) providerForm(tool string, p provider.Provider) {
 				return
 			}
 			next.Env = env
-			next.KeyVar = "ANTHROPIC_AUTH_TOKEN"
-			if keyVar.Selected == keyAPIKey {
-				next.KeyVar = "ANTHROPIC_API_KEY"
-			}
+			next.KeyVar = keyVarOf(keyVar.Selected)
 		} else {
 			next.WireAPI = wire.Selected
 		}
@@ -605,8 +616,9 @@ func (a *app) skillsTabContent() fyne.CanvasObject {
 	})
 	fromGitHub.Importance = widget.HighImportance
 	fromZip := widget.NewButton("From zip…", func() { a.runOp(a.doSkillInstallZip) })
+	fromFolder := widget.NewButton("From folder…", func() { a.runOp(a.doSkillInstallFolder) })
 
-	items := []fyne.CanvasObject{tabHeader("Skills", "Installed once in ~/.agents/skills, which Codex, Gemini CLI, Cursor, OpenCode and Qwen Code read, and linked into ~/.claude/skills for Claude Code.", fromZip, fromGitHub)}
+	items := []fyne.CanvasObject{tabHeader("Skills", "Installed once in ~/.agents/skills, which Codex, Gemini CLI, Cursor, OpenCode and Qwen Code read, and linked into ~/.claude/skills for Claude Code.", fromFolder, fromZip, fromGitHub)}
 	list := skills.List()
 	if len(list) == 0 {
 		items = append(items, newPanel(lowLabel("No skills installed.")))

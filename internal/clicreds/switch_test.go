@@ -1,5 +1,3 @@
-//go:build darwin
-
 package clicreds
 
 import (
@@ -140,5 +138,40 @@ func TestProfileThatIsNotJSONIsLeftAlone(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(cfg); string(b) != "not json" {
 		t.Fatalf("file changed: %q", b)
+	}
+}
+
+// The Linux and Windows store: Claude Code's credentials file is the live
+// login, and the account's copy is a file under StoreDir.
+func TestFileStoreSwitch(t *testing.T) {
+	h := t.TempDir()
+	oldR, oldW, oldD, oldH, oldS := read, write, remove, home, StoreDir
+	t.Cleanup(func() { read, write, remove, home, StoreDir = oldR, oldW, oldD, oldH, oldS })
+	read, write, remove = fileRead, fileWrite, fileRemove
+	home = func() (string, error) { return h, nil }
+	StoreDir = t.TempDir()
+	live := filepath.Join(h, ".claude", ".credentials.json")
+	os.MkdirAll(filepath.Dir(live), 0o700)
+
+	os.WriteFile(live, []byte(`{"claudeAiOauth":{"a":1},"mcpOAuth":{"m":1}}`), 0o600)
+	if err := Save("one"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(live, []byte(`{"claudeAiOauth":{"b":2},"mcpOAuth":{"m":1}}`), 0o600)
+	if found, err := Restore(t.TempDir(), "one"); err != nil || !found {
+		t.Fatalf("restore: found=%v err=%v", found, err)
+	}
+	doc, err := readJSONFile(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compact(doc["claudeAiOauth"]) != `{"a":1}` || compact(doc["mcpOAuth"]) != `{"m":1}` {
+		t.Fatalf("live after restore: %v", doc)
+	}
+	if found, _ := Restore(t.TempDir(), "never-saved"); found {
+		t.Fatal("unsaved account restored a login")
+	}
+	if doc, _ := readJSONFile(live); doc["claudeAiOauth"] != nil || doc["mcpOAuth"] == nil {
+		t.Fatalf("unsaved account should sign out but keep machine keys: %v", doc)
 	}
 }
