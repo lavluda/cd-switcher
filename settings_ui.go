@@ -24,29 +24,65 @@ import (
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
 
-// settingsContent builds the settings window as a left-rail tab system, one
-// tab per settings area. Runs on the UI thread. This is rebuilt from scratch
-// on every refresh() call (a stats poll, a switch, a toggle flip all trigger
-// one), so the previously selected tab is restored from a.settingsTabIndex
-// rather than a fresh fyne.Container defaulting back to the first tab.
+// settingsPage is one entry in the Settings sidebar. section starts a new
+// captioned group in the sidebar when it differs from the page before.
+type settingsPage struct {
+	section, title string
+	icon           fyne.Resource
+	build          func(*app) fyne.CanvasObject
+}
+
+// A function, not a var: the page builders reach settingsContent, which
+// reads this list, and Go rejects that as an initialization cycle.
+func settingsPages() []settingsPage {
+	return []settingsPage{
+		{"", "General", theme.SettingsIcon(), (*app).generalTabContent},
+		{"Claude", "Accounts", theme.AccountIcon(), (*app).accountsTabContent},
+		{"Claude", "Switching", theme.ViewRefreshIcon(), (*app).manageProfilesTabContent},
+		{"Other tools", "Codex & Copilot", theme.ComputerIcon(), (*app).codexTabContent},
+		{"Other tools", "Providers", theme.StorageIcon(), (*app).providersTabContent},
+		{"Shared setup", "MCP servers", theme.GridIcon(), (*app).mcpTabContent},
+		{"Shared setup", "Skills", theme.FolderIcon(), (*app).skillsTabContent},
+		{"Shared setup", "Instructions", theme.DocumentIcon(), (*app).instructionsTabContent},
+	}
+}
+
+// settingsContent builds the settings window: a grouped sidebar and the
+// selected page. Runs on the UI thread. It is rebuilt on every refresh() (a
+// stats poll, a switch, a toggle flip), so only the open page is built and
+// the selection lives in a.settingsTabIndex.
 //
 // Update checking lives in the tray menu, not here — see
 // (*app).updateMenuItem in main.go — so it works without opening this window.
 func (a *app) settingsContent() fyne.CanvasObject {
-	general := container.NewTabItemWithIcon("General", theme.SettingsIcon(), a.generalTabContent())
-	profiles := container.NewTabItemWithIcon("Manage Profiles", theme.AccountIcon(), a.manageProfilesTabContent())
-	accounts := container.NewTabItemWithIcon("Accounts", theme.ListIcon(), a.accountsTabContent())
-	codexTab := container.NewTabItemWithIcon("Codex & Copilot", theme.ComputerIcon(), a.codexTabContent())
-	providers := container.NewTabItemWithIcon("Providers", theme.StorageIcon(), a.providersTabContent())
-	mcpTab := container.NewTabItemWithIcon("MCP", theme.GridIcon(), a.mcpTabContent())
-	skillsTab := container.NewTabItemWithIcon("Skills", theme.FolderIcon(), a.skillsTabContent())
-	instr := container.NewTabItemWithIcon("Instructions", theme.DocumentIcon(), a.instructionsTabContent())
-
-	tabs := container.NewAppTabs(general, profiles, accounts, codexTab, providers, mcpTab, skillsTab, instr)
-	tabs.SetTabLocation(container.TabLocationLeading)
-	tabs.OnSelected = func(*container.TabItem) { a.settingsTabIndex = tabs.SelectedIndex() }
-	tabs.SelectIndex(a.settingsTabIndex)
-	return tabs
+	pages := settingsPages()
+	if a.settingsTabIndex < 0 || a.settingsTabIndex >= len(pages) {
+		a.settingsTabIndex = 0
+	}
+	nav := []fyne.CanvasObject{}
+	section := ""
+	for i, pg := range pages {
+		if pg.section != section {
+			section = pg.section
+			nav = append(nav, container.New(layout.NewCustomPaddedLayout(10, 0, 8, 0), sectionCaption(section)))
+		}
+		i := i
+		b := widget.NewButtonWithIcon(pg.title, pg.icon, func() {
+			a.settingsTabIndex = i
+			if a.settingsWin != nil {
+				a.settingsWin.SetContent(a.settingsContent())
+			}
+		})
+		b.Alignment = widget.ButtonAlignLeading
+		b.Importance = widget.LowImportance
+		if i == a.settingsTabIndex {
+			b.Importance = widget.MediumImportance
+		}
+		nav = append(nav, b)
+	}
+	sidebar := container.New(layout.NewCustomPaddedLayout(10, 10, 8, 8), vbox(2, nav...))
+	page := pages[a.settingsTabIndex].build(a)
+	return container.NewBorder(nil, nil, container.NewHBox(sidebar, widget.NewSeparator()), nil, page)
 }
 
 // generalTabContent is the "General" tab: how accounts switch, when to warn
@@ -63,10 +99,6 @@ func (a *app) generalTabContent() fyne.CanvasObject {
 	term := a.cfg.Terminal
 	a.mu.Unlock()
 
-	title := headingText("General")
-	sub := widget.NewLabel("Account switching, limit alerts, and startup")
-	sub.Importance = widget.LowImportance
-
 	rows := []fyne.CanvasObject{a.modeRow(parallel), a.alertRow(warnAt)}
 	if row := a.loginRow(launchAtLogin); row != nil {
 		rows = append(rows, row)
@@ -79,11 +111,10 @@ func (a *app) generalTabContent() fyne.CanvasObject {
 	))
 	rows = append(rows, a.terminalRow(term), a.exportRow())
 
-	body := vbox(10, vbox(2, title, sub), group(rows...))
-	return container.NewVScroll(container.NewPadded(body))
+	return scrollTab(tabHeader("General", "Account switching, limit alerts, and startup"), group(rows...))
 }
 
-// manageProfilesTabContent is the "Manage Profiles" tab: the tray-display and
+// manageProfilesTabContent is the "Switching" page: the tray-display and
 // auto-switch toggles. The accounts themselves live in their own "Accounts"
 // tab, since that list can get long and scrolls independently.
 func (a *app) manageProfilesTabContent() fyne.CanvasObject {
@@ -96,10 +127,6 @@ func (a *app) manageProfilesTabContent() fyne.CanvasObject {
 	strategy := a.cfg.AutoSwitchStrategy
 	a.mu.Unlock()
 
-	title := headingText("Manage Profiles")
-	sub := widget.NewLabel("Choose how multiple Claude accounts behave")
-	sub.Importance = widget.LowImportance
-
 	rows := []fyne.CanvasObject{a.multiProfileRow(showMultiple), a.autoSwitchRow(autoSwitch, autoSwitchAt, profileCount > 1), a.strategyRow(strategy, profileCount > 1)}
 	if clicreds.Supported() {
 		rows = append(rows, toggleRow(
@@ -110,10 +137,7 @@ func (a *app) manageProfilesTabContent() fyne.CanvasObject {
 		))
 	}
 	rows = append(rows, a.statuslineRow(ratelimits.Installed()))
-	display := group(rows...)
-
-	body := vbox(10, vbox(2, title, sub), display)
-	return container.NewVScroll(container.NewPadded(body))
+	return scrollTab(tabHeader("Switching", "How CD-Switcher moves between your Claude accounts"), group(rows...))
 }
 
 // accountsTabContent is the "Accounts" tab: every captured Claude account
@@ -127,12 +151,9 @@ func (a *app) accountsTabContent() fyne.CanvasObject {
 	a.mu.Unlock()
 	_, best, hasBest := a.freest(profiles)
 
-	title := headingText("Accounts")
-	sub := widget.NewLabel("Create and manage multiple Claude accounts")
-	sub.Importance = widget.LowImportance
 	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() { go a.refreshStats(0) })
 	refreshBtn.Importance = widget.LowImportance
-	header := container.NewBorder(nil, nil, vbox(2, title, sub), refreshBtn)
+	header := tabHeader("Accounts", "Your Claude accounts, their limits and recent use", refreshBtn)
 
 	var cardObjs []fyne.CanvasObject
 	if len(profiles) == 0 {
@@ -147,8 +168,7 @@ func (a *app) accountsTabContent() fyne.CanvasObject {
 	note.Wrapping = fyne.TextWrapWord
 	note.Importance = widget.LowImportance
 
-	body := vbox(10, header, cards, note)
-	return container.NewVScroll(container.NewPadded(body))
+	return scrollTab(header, cards, note)
 }
 
 // modeRow is one row of the General group: a compact segmented control
@@ -453,11 +473,7 @@ func (a *app) accountActions(id string, colorIdx int, active, parallel, windowOp
 		primary = widget.NewButton("Switch", func() {
 			a.runOp(func() error { return a.doSwitch(id) })
 		})
-		if active {
-			primary.Disable()
-		} else {
-			primary.Importance = widget.HighImportance
-		}
+		primary.Importance = widget.HighImportance
 	}
 
 	upBtn := widget.NewButtonWithIcon("", theme.MoveUpIcon(), func() {
@@ -487,7 +503,12 @@ func (a *app) accountActions(id string, colorIdx int, active, parallel, windowOp
 	})
 	removeBtn.Importance = widget.LowImportance
 
-	return container.NewBorder(nil, nil, container.NewHBox(upBtn, downBtn, colorBtn, renameBtn, removeBtn), primary)
+	tools := container.NewHBox(upBtn, downBtn, colorBtn, renameBtn, removeBtn)
+	// The active account needs no Switch button; its badge already says so.
+	if !parallel && active {
+		return tools
+	}
+	return container.NewBorder(nil, nil, tools, primary)
 }
 
 func usageMeter(m usage.Meter) fyne.CanvasObject {

@@ -398,7 +398,7 @@ func (a *app) refresh() {
 func (a *app) openSettings() {
 	if a.settingsWin == nil {
 		w := a.fyneApp.NewWindow("Settings")
-		w.Resize(fyne.NewSize(780, 760))
+		w.Resize(fyne.NewSize(860, 720))
 		// Closing the window must not quit the app (the tray lives on).
 		w.SetCloseIntercept(w.Hide)
 		a.settingsWin = w

@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 
 	"github.com/lavluda/cd-switcher/internal/codex"
@@ -51,14 +50,12 @@ func TestSettingsTabsAndFormsBuild(t *testing.T) {
 
 	w := test.NewWindow(nil)
 	a.settingsWin = w
-	content := a.settingsContent()
-	tabs := content.(*container.AppTabs)
-	w.SetContent(content)
 	w.Resize(fyne.NewSize(900, 700))
-	for i, item := range tabs.Items {
-		tabs.SelectIndex(i)
-		if item.Content.MinSize().Height <= 0 {
-			t.Fatalf("tab %q rendered empty", item.Text)
+	for i, pg := range settingsPages() {
+		a.settingsTabIndex = i
+		w.SetContent(a.settingsContent())
+		if pg.build(a).MinSize().Height <= 0 {
+			t.Fatalf("page %q rendered empty", pg.title)
 		}
 	}
 	if n := len(a.codexMenuItems()); n < 4 {

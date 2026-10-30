@@ -33,11 +33,27 @@ func tabHeader(title, subtitle string, actions ...fyne.CanvasObject) fyne.Canvas
 	sub := widget.NewLabel(subtitle)
 	sub.Importance = widget.LowImportance
 	sub.Wrapping = fyne.TextWrapWord
-	left := vbox(2, headingText(title), sub)
-	if len(actions) == 0 {
-		return left
+	head := fyne.CanvasObject(headingText(title))
+	if len(actions) > 0 {
+		// Buttons sit beside the title, centred, so they keep their own
+		// height and the subtitle below gets the full width.
+		head = container.NewBorder(nil, nil, nil, container.NewCenter(container.NewHBox(actions...)), head)
 	}
-	return container.NewBorder(nil, nil, nil, container.NewHBox(actions...), left)
+	return vbox(2, head, sub)
+}
+
+// actionRow is a list row: text on the left, buttons on the right kept at
+// their own height instead of stretched to the row's.
+func actionRow(left fyne.CanvasObject, right ...fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewBorder(nil, nil, nil, container.NewCenter(container.NewHBox(right...)), left)
+}
+
+// mutedText is a one-line, non-wrapping low-importance label for use inside
+// an HBox, where a wrapping label gets no width and breaks every character.
+func mutedText(text string) *widget.Label {
+	l := widget.NewLabel(text)
+	l.Importance = widget.LowImportance
+	return l
 }
 
 func lowLabel(text string) *widget.Label {
@@ -117,12 +133,20 @@ func (a *app) codexCard(x profile.CodexAccount, active bool) fyne.CanvasObject {
 	if active {
 		meta.Add(badge("Active"))
 	}
-	info := x.Email
-	if x.Plan != "" {
-		info += " · " + x.Plan
+	var info []string
+	if !strings.EqualFold(x.Email, x.Label) {
+		info = append(info, x.Email)
 	}
-	meta.Add(lowLabel(info))
-	body := []fyne.CanvasObject{name, meta}
+	if x.Plan != "" {
+		info = append(info, x.Plan)
+	}
+	if len(info) > 0 {
+		meta.Add(mutedText(strings.Join(info, " · ")))
+	}
+	body := []fyne.CanvasObject{name}
+	if len(meta.Objects) > 0 {
+		body = append(body, meta)
+	}
 
 	a.statsMu.Lock()
 	e, ok := a.codexCache[x.ID]
@@ -149,16 +173,16 @@ func (a *app) codexCard(x profile.CodexAccount, active bool) fyne.CanvasObject {
 	}
 
 	id := x.ID
-	use := widget.NewButton("Use", func() { a.runOp(func() error { return a.doCodexSwitch(id) }) })
-	if active {
-		use.Disable()
-	} else {
-		use.Importance = widget.HighImportance
-	}
 	actions := container.NewHBox(
 		iconButton(theme.DocumentCreateIcon(), func() { a.runOp(func() error { return a.doCodexRename(id) }) }),
 		iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doCodexRemove(id) }) }),
 	)
+	var use fyne.CanvasObject
+	if !active {
+		b := widget.NewButton("Use", func() { a.runOp(func() error { return a.doCodexSwitch(id) }) })
+		b.Importance = widget.HighImportance
+		use = b
+	}
 	body = append(body, container.NewBorder(nil, nil, actions, use))
 	return newPanel(vbox(6, body...))
 }
@@ -180,11 +204,11 @@ func (a *app) providersTabContent() fyne.CanvasObject {
 		rows := []fyne.CanvasObject{lowLabel("These variables override what is set here in every terminal that loads them:")}
 		for _, f := range found {
 			f := f
-			row := container.NewBorder(nil, nil, nil, nil, widget.NewLabel(f.String()))
+			row := fyne.CanvasObject(widget.NewLabel(f.String()))
 			if f.File != "" && f.Line > 0 {
-				row = container.NewBorder(nil, nil, nil, widget.NewButton("Comment out", func() {
+				row = actionRow(row, widget.NewButton("Comment out", func() {
 					a.runOp(func() error { return a.doDisableEnv(f) })
-				}), widget.NewLabel(f.String()))
+				}))
 			}
 			rows = append(rows, row)
 		}
@@ -243,7 +267,7 @@ func (a *app) providerRow(tool string, p provider.Provider, inUse bool) fyne.Can
 			iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doProviderDelete(p.ID) }) }),
 		)
 	}
-	return container.NewBorder(nil, nil, nil, container.NewHBox(right...), left)
+	return actionRow(left, right...)
 }
 
 func parseEnvLines(text string) (map[string]string, error) {
@@ -430,11 +454,10 @@ func (a *app) mcpCard(s mcp.Server, tools []string) fyne.CanvasObject {
 		checks.Add(c)
 	}
 	srv := s
-	actions := container.NewHBox(
+	head := actionRow(vbox(0, name, lowLabel(what)),
 		iconButton(theme.DocumentCreateIcon(), func() { a.mcpForm(srv, srv.Name) }),
 		iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doMCPDelete(srv.Name) }) }),
 	)
-	head := container.NewBorder(nil, nil, nil, actions, vbox(0, name, lowLabel(what)))
 	return newPanel(vbox(4, head, checks))
 }
 
@@ -610,7 +633,7 @@ func (a *app) skillsTabContent() fyne.CanvasObject {
 		}
 		right = append(right, iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doSkillRemove(s.Name) }) }))
 		name := widget.NewLabelWithStyle(s.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		rows = append(rows, container.NewBorder(nil, nil, nil, container.NewHBox(right...), vbox(0, name, lowLabel(where))))
+		rows = append(rows, actionRow(vbox(0, name, lowLabel(where)), right...))
 	}
 	if len(rows) > 0 {
 		items = append(items, group(rows...))
@@ -677,7 +700,7 @@ func (a *app) instructionsTabContent() fyne.CanvasObject {
 			iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doInstrDelete(e.ID) }) }),
 		)
 		name := widget.NewLabelWithStyle(e.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		rows = append(rows, container.NewBorder(nil, nil, nil, container.NewHBox(right...), vbox(0, name, lowLabel(preview))))
+		rows = append(rows, actionRow(vbox(0, name, lowLabel(preview)), right...))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, lowLabel("No instructions saved yet."))

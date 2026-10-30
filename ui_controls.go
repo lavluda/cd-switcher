@@ -262,7 +262,8 @@ func badge(text string) fyne.CanvasObject {
 	bg := canvas.NewRectangle(uitheme.AccentSoft)
 	bg.CornerRadius = 8
 	padded := container.New(layout.NewCustomPaddedLayout(3, 3, 10, 10), lbl)
-	return container.NewStack(bg, padded)
+	// Centred so a taller row around it doesn't stretch the capsule.
+	return container.NewCenter(container.NewStack(bg, padded))
 }
 
 // headingText renders a canvas.Text sized and colored for a page title —
