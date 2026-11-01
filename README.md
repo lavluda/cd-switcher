@@ -70,7 +70,7 @@ General, Manage Profiles and Accounts cover Claude Desktop; the tabs for the
 other tools are described under [Other AI tools](#other-ai-tools).
 
 **General** — switching mode, limit alerts, open at login (macOS), automatic
-update checks, the terminal app, and export/import. Limit alerts notify you once when a session or
+update checks, the agent inbox, the terminal app, and export/import. Limit alerts notify you once when a session or
 weekly limit reaches 80% (or 70% or 90%); the notice stays quiet until that
 window resets, or until usage falls back under the line. Choose Off to
 silence it.
@@ -149,6 +149,15 @@ for a skill that only Claude Code had.
 **Instructions.** One set of global instructions written to `CLAUDE.md`,
 `AGENTS.md`, `GEMINI.md` and `QWEN.md` for the tools you tick. Your existing
 files are read in on first start; nothing is written until you choose Use.
+
+**Agent inbox.** Turn it on in General and the menu lists your Claude Code
+and Codex sessions: working, needs you, or done. You get one notification
+when a session asks for permission and one when it finishes. On macOS,
+clicking a session brings forward the app it runs in. It works by adding a
+small hook for a few events to `~/.claude/settings.json` and
+`~/.codex/hooks.json`; your other hooks stay as they are, and turning the
+inbox off removes only CD-Switcher's. Codex asks you to trust new hooks
+once: run `/hooks` in Codex after turning the inbox on.
 
 **Terminal and links.** "Open Claude Code" and "Open Codex" in the menu start
 the CLI in your terminal app (General). Export writes providers, MCP servers,

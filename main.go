@@ -27,6 +27,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"github.com/ncruces/zenity"
 
+	"github.com/lavluda/cd-switcher/internal/agents"
 	"github.com/lavluda/cd-switcher/internal/cfgfile"
 	"github.com/lavluda/cd-switcher/internal/claude"
 	"github.com/lavluda/cd-switcher/internal/clicreds"
@@ -64,7 +65,9 @@ type app struct {
 	ops chan func() error
 
 	pendingLogin bool
-	busy         bool // an operation is in progress (drives the status row)
+	// agentSessions is the agent inbox, newest reading from the hooks.
+	agentSessions []agents.Session
+	busy          bool // an operation is in progress (drives the status row)
 
 	// updateChecking marks a GitHub release check in flight, so the Updates
 	// tab's button can show "Checking…" and a second click (or the daily
@@ -160,6 +163,13 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == ratelimits.Arg {
 		if store, err := profile.NewStore(); err == nil {
 			ratelimits.RunHook(store.Root(), os.Stdin, os.Stdout)
+		}
+		return
+	}
+	// Claude Code and Codex run it as a hook on agent events; same rules.
+	if len(os.Args) > 2 && os.Args[1] == agents.Arg {
+		if store, err := profile.NewStore(); err == nil {
+			agents.RunHook(store.Root(), os.Args[2], os.Stdin)
 		}
 		return
 	}
@@ -259,6 +269,7 @@ func (a *app) setup() {
 	go a.startStatsLoop()
 	go a.startUpdateCheckLoop()
 	go a.watchParallelWindows()
+	go a.watchInbox()
 
 	// Read in the MCP servers and instruction files the tools already have,
 	// once; nothing is written until something is changed here.
@@ -339,6 +350,9 @@ func (a *app) buildAndSetMenu() {
 	}
 
 	items := []*fyne.MenuItem{status, fyne.NewMenuItemSeparator()}
+	if inbox := a.inboxMenuItems(); len(inbox) > 0 {
+		items = append(append(items, inbox...), fyne.NewMenuItemSeparator())
+	}
 
 	for i, p := range profiles {
 		if i > 0 {

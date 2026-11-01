@@ -17,6 +17,7 @@ import (
 
 	"github.com/lavluda/cd-switcher/internal/claude"
 	"github.com/lavluda/cd-switcher/internal/clicreds"
+	"github.com/lavluda/cd-switcher/internal/harness"
 	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/login"
 	"github.com/lavluda/cd-switcher/internal/profile"
@@ -114,6 +115,12 @@ func (a *app) generalTabContent() fyne.CanvasObject {
 		"Check once a day in the background. Check for Updates in the tray menu runs one on demand.",
 		autoCheckUpdates, true,
 		func(checked bool) { a.runOp(func() error { return a.doSetAutoCheckUpdates(checked) }) },
+	))
+	rows = append(rows, toggleRow(
+		"Agent inbox",
+		"Lists your Claude Code and Codex sessions in the menu, and notifies you when one needs your permission or finishes. Adds a small hook to each tool; your other hooks stay as they are.",
+		inboxInstalled(), harness.Installed(harness.Claude, "") || harness.Installed(harness.Codex, ""),
+		func(checked bool) { a.runOp(func() error { return a.doSetInbox(checked) }) },
 	))
 	rows = append(rows, a.terminalRow(term), a.exportRow())
 
