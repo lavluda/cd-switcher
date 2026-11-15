@@ -1,0 +1,6 @@
+{
+  "checks": [
+    {"id": "vet", "name": "Vet", "run": "go vet ./internal/...", "timeout_s": 600, "network": true},
+    {"id": "test", "name": "Tests", "run": "go test -json -count=1 ./internal/...", "format": "go-test-json", "timeout_s": 600, "network": true}
+  ]
+}
