@@ -3,6 +3,16 @@ version: 1
 # Clean-room checks, run on Linux with CGO off: the root package (Fyne, cgo) cannot
 # build there, so only ./internal/... is vetted and tested. CI on macOS runs the rest.
 checks:
+  - id: fmt
+    name: Format
+    run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+    timeout_s: 120
+    network: false
+  - id: build
+    name: Build
+    run: go build ./internal/...
+    timeout_s: 600
+    network: true
   - id: vet
     name: Vet
     run: go vet ./internal/...
