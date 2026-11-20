@@ -1,0 +1,29 @@
+version: 1
+
+# Clean-room checks, run on Linux with CGO off: the root package (Fyne, cgo) cannot
+# build there, so only ./internal/... is vetted and tested. CI on macOS runs the rest.
+checks:
+  - id: vet
+    name: Vet
+    run: go vet ./internal/...
+    timeout_s: 600
+    network: true
+  - id: test
+    name: Tests
+    run: go test -json -count=1 ./internal/...
+    format: go-test-json
+    timeout_s: 600
+    network: true
+
+rules:
+  text: |
+    - The UI uses Fyne (OpenGL + cgo). The sandbox builds with CGO_ENABLED=0 on Linux, so the root
+      package and main.go do not build there; keep logic that needs tests in internal/.
+    - macOS-only code lives in *_darwin.go files with a *_other.go counterpart; keep both in step.
+      *_darwin_test.go cannot run here; say so when a change depends on one.
+    - Switching accounts swaps a profile's files wholesale and never decrypts them. Only the usage
+      fetch decrypts a cached OAuth token, in memory, and writes back a refresh token the server
+      rotated, encrypted. Never log or print a token, cookie or sessionKey, and never add another
+      place that decrypts or writes them.
+    - Run gofmt on every Go file you change.
+    - Update README.md when a user-visible behaviour or a menu item changes.
