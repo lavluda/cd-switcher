@@ -14,16 +14,28 @@ ifeq ($(shell uname -s),Darwin)
 GOFLAGS_LD := -ldflags=-extldflags=-Wl,-no_warn_duplicate_libraries
 endif
 
-.PHONY: build run test fmt vet clean windows
+.PHONY: build run mac-app test fmt vet clean windows
 
 build:
 	go build $(GOFLAGS_LD) -o bin/$(BIN) .
 
+ifeq ($(shell uname -s),Darwin)
+run: mac-app
+	open bin/CD-Switcher-dev.app
+else
 run: build
 	./bin/$(BIN)
+endif
+
+# Native notifications use the bundle icon; a bare binary uses AppleScript's.
+mac-app: build
+	sh scripts/package-dev-macos.sh
 
 test:
 	go test ./internal/...
+ifeq ($(shell uname -s),Darwin)
+	sh scripts/test-inbox-notifications.sh
+endif
 
 fmt:
 	gofmt -w .

@@ -24,21 +24,25 @@ import (
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/theme"
 	"github.com/ncruces/zenity"
 
+	"github.com/lavluda/cd-switcher/internal/agents"
+	"github.com/lavluda/cd-switcher/internal/cfgfile"
 	"github.com/lavluda/cd-switcher/internal/claude"
 	"github.com/lavluda/cd-switcher/internal/clicreds"
+	"github.com/lavluda/cd-switcher/internal/deeplink"
 	"github.com/lavluda/cd-switcher/internal/dockicon"
 	"github.com/lavluda/cd-switcher/internal/hotkey"
 	"github.com/lavluda/cd-switcher/internal/icon"
 	"github.com/lavluda/cd-switcher/internal/login"
 	"github.com/lavluda/cd-switcher/internal/profile"
+	"github.com/lavluda/cd-switcher/internal/ratelimits"
 	"github.com/lavluda/cd-switcher/internal/secret"
 	"github.com/lavluda/cd-switcher/internal/selfupdate"
 	"github.com/lavluda/cd-switcher/internal/switcher"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
 	"github.com/lavluda/cd-switcher/internal/updatecheck"
+	"github.com/lavluda/cd-switcher/internal/urlevent"
 	"github.com/lavluda/cd-switcher/internal/usage"
 )
 
@@ -60,7 +64,9 @@ type app struct {
 	ops chan func() error
 
 	pendingLogin bool
-	busy         bool // an operation is in progress (drives the status row)
+	// agentSessions is the agent inbox, newest reading from the hooks.
+	agentSessions []agents.Session
+	busy          bool // an operation is in progress (drives the status row)
 
 	// updateChecking marks a GitHub release check in flight, so the Updates
 	// tab's button can show "Checking…" and a second click (or the daily
@@ -68,16 +74,17 @@ type app struct {
 	// requests racing to write a.cfg.
 	updateChecking bool
 
-	fyneApp     fyne.App
-	desk        desktop.App
-	menu        *fyne.Menu
-	settingsWin fyne.Window
-	// settingsTabIndex is the Settings window's currently selected tab.
-	// settingsContent() rebuilds the whole tab widget on every refresh (a
-	// stats poll, a switch, a toggle), so this is what keeps the window on
-	// the tab the user is looking at instead of snapping back to the first
-	// one each time. UI-thread only, like settingsWin.
-	settingsTabIndex int
+	fyneApp fyne.App
+	desk    desktop.App
+	menu    *fyne.Menu
+	// panelWin is the menu-bar panel. panelOpen tracks it where the OS
+	// cannot report visibility; on macOS visibility is read from the window.
+	panelWin  fyne.Window
+	panelOpen bool
+	// trayTapAt is the last tray tap, used to drop the duplicate tap one click can send.
+	trayTapAt time.Time
+	// usage is the Usage page's log scanner and filter choices.
+	usage usageState
 
 	normalIcon fyne.Resource
 	spin       []fyne.Resource // spinner animation frames
@@ -116,6 +123,13 @@ type app struct {
 	// the threshold.
 	alertMu sync.Mutex
 	alerted map[alertKey]struct{}
+
+	// codexCache and copilot hold the other tools' quotas, under statsMu.
+	codexCache map[string]codexEntry
+	copilot    copilotEntry
+
+	// codexLoginRunning is set while a `codex login` waits in the browser.
+	codexLoginRunning atomic.Bool
 }
 
 type alertKey struct {
@@ -134,12 +148,39 @@ type statEntry struct {
 	tier      string
 	fetchedAt time.Time // zero => never succeeded => render "—"
 	err       error     // last attempt's outcome; nil if it succeeded
+	// fromClaudeCode marks session and weekly figures that came from Claude
+	// Code's statusline rather than the usage API.
+	fromClaudeCode bool
+	// email is the account's address as Claude Code last reported it.
+	email string
 }
 
 func main() {
+	// Claude Code runs this binary as its statusline command; that must stay
+	// fast and must not start the UI.
+	if len(os.Args) > 1 && os.Args[1] == ratelimits.Arg {
+		if store, err := profile.NewStore(); err == nil {
+			ratelimits.RunHook(store.Root(), os.Stdin, os.Stdout)
+		}
+		return
+	}
+	// Claude Code, Codex, Cursor and OpenCode run it as a hook on agent events; same rules.
+	if len(os.Args) > 2 && os.Args[1] == agents.Arg {
+		if store, err := profile.NewStore(); err == nil {
+			agents.RunHook(store.Root(), os.Args[2], os.Stdin)
+		}
+		return
+	}
+	// On Linux and Windows a clicked link starts a new process; hand it to
+	// the running app instead of opening a second tray.
+	if link := linkArg(); link != "" {
+		if store, err := profile.NewStore(); err == nil && urlevent.Forward(store.Root(), link) {
+			return
+		}
+	}
 	a.fyneApp = fyneapp.New()
-	// Restyles the Settings window only — the system tray menu and zenity
-	// dialogs are native OS chrome and don't go through Fyne's theme.
+	initInboxNotifications()
+	// Restyles Fyne surfaces. Zenity dialogs stay native OS chrome.
 	a.fyneApp.Settings().SetTheme(uitheme.New())
 
 	desk, ok := a.fyneApp.(desktop.App)
@@ -168,6 +209,8 @@ func (a *app) setup() {
 	}
 	a.store = store
 	initLog(store.Root())
+	cfgfile.BackupDir = filepath.Join(store.Root(), "backups", "first-write")
+	clicreds.StoreDir = store.Root()
 
 	a.normalIcon = fyne.NewStaticResource("cd-switcher", icon.Data())
 	a.restIcon = a.normalIcon
@@ -193,6 +236,11 @@ func (a *app) setup() {
 	// account" and "Save this account": offer the save again instead of an
 	// "Add account" that would wipe the fresh login.
 	a.pendingLogin = a.cfg.ActiveProfile == "" && len(a.cfg.Profiles) > 0
+	if a.cfg.SwitchCLI {
+		if err := clicreds.Recover(store.Root()); err != nil {
+			logf("finish interrupted CLI login switch: %v", err)
+		}
+	}
 
 	a.usageClient = usage.NewClient()
 
@@ -219,134 +267,70 @@ func (a *app) setup() {
 	go a.startStatsLoop()
 	go a.startUpdateCheckLoop()
 	go a.watchParallelWindows()
+	go a.watchInbox()
+
+	// Read in the MCP servers and instruction files the tools already have,
+	// once; nothing is written until something is changed here.
+	a.queueOp(func() error {
+		if a.cfg.MCPImported {
+			return a.loadInstructionsOnce()
+		}
+		if err := a.doMCPImport(); err != nil {
+			logf("mcp import: %v", err)
+		}
+		return a.loadInstructionsOnce()
+	})
+	if exe, err := os.Executable(); err == nil {
+		if err := urlevent.Register(exe); err != nil {
+			logf("register %s:// links: %v", deeplink.Scheme, err)
+		}
+	}
+	links := urlevent.Listen(store.Root())
+	go func() {
+		if link := linkArg(); link != "" {
+			a.handleLink(link)
+		}
+		for link := range links {
+			a.handleLink(link)
+		}
+	}()
 }
 
-// buildAndSetMenu rebuilds the tray menu from current state and installs it.
+// linkArg is a cdswitcher:// link passed on the command line, if any.
+func linkArg() string {
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, deeplink.Scheme+"://") {
+			return arg
+		}
+	}
+	return ""
+}
+
+// buildAndSetMenu rebuilds the tray icon and, when it is open, the menu-bar panel.
 // It must run on the UI thread (called directly pre-Run, via fyne.Do after).
 func (a *app) buildAndSetMenu() {
-	// Snapshot everything the menu needs under the lock: the worker goroutine
+	// Snapshot everything the icon needs under the lock: the worker goroutine
 	// mutates a.cfg's slice/fields concurrently, so we must not read them after
 	// unlocking.
 	a.mu.Lock()
 	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	active, hasActive := a.cfg.Active()
-	pending := a.pendingLogin
-	busy := a.busy
-	parallel := a.cfg.IsParallel()
 	showMultiple := a.cfg.ShowMultipleProfiles
 	a.mu.Unlock()
 
-	running := map[string]bool{}
-	if parallel {
-		if dirs, err := claude.RunningDataDirs(); err == nil {
-			for _, dir := range dirs {
-				running[dir] = true
-			}
-		}
-	}
-
 	a.updateTrayIcon(profiles, active.ID, hasActive, showMultiple)
-
-	status := fyne.NewMenuItem("", nil)
-	status.Disabled = true
-	switch {
-	case busy:
-		status.Label = "⏳ Working…"
-	case pending:
-		status.Label = "Waiting for new login…"
-	case parallel:
-		status.Label = "Side by side"
-	case hasActive:
-		status.Label = "Active: " + active.Label
-	default:
-		status.Label = "No account active"
+	a.ensurePanel()
+	if a.panelShowing() {
+		a.panelWin.SetContent(a.panelContent())
 	}
-
-	items := []*fyne.MenuItem{status, fyne.NewMenuItemSeparator()}
-
-	for i, p := range profiles {
-		if i > 0 {
-			items = append(items, fyne.NewMenuItemSeparator())
-		}
-		id := p.ID
-		it := fyne.NewMenuItem(p.Label, func() {
-			a.runOp(func() error { return a.doSwitch(id) })
-		})
-		ci := p.ColorIndex(i)
-		it.Icon = fyne.NewStaticResource(fmt.Sprintf("swatch%d.png", ci), icon.Swatch(ci))
-		if parallel {
-			dir, _ := filepath.Abs(a.store.ProfileDir(id))
-			it.Checked = running[filepath.Clean(dir)]
-		} else {
-			it.Checked = hasActive && id == active.ID
-		}
-
-		items = append(items, it)
-		items = append(items, a.statLinesFor(id)...)
-	}
-	items = append(items, fyne.NewMenuItemSeparator())
-	if item, ok := a.freestMenuItem(profiles, active.ID, hasActive, parallel); ok {
-		items = append(items, item)
-	}
-	refreshItem := fyne.NewMenuItem("Refresh usage", func() { go a.refreshStats(0) })
-	refreshItem.Icon = theme.ViewRefreshIcon()
-	items = append(items, refreshItem)
-
-	if pending {
-		items = append(items, fyne.NewMenuItem("✓ Save this account", func() {
-			a.runOp(a.doSaveAccount)
-		}))
-	} else {
-		add := fyne.NewMenuItem("Add account…", func() {
-			a.runOp(a.doAddAccount)
-		})
-		add.Icon = theme.ContentAddIcon()
-		items = append(items, add)
-	}
-
-	settings := fyne.NewMenuItem("Settings…", a.openSettings)
-	settings.Icon = theme.SettingsIcon()
-	update := a.updateMenuItem()
-	update.Icon = theme.DownloadIcon()
-	quit := fyne.NewMenuItem("Quit", func() { a.fyneApp.Quit() })
-	quit.Icon = theme.LogoutIcon()
-	items = append(items,
-		fyne.NewMenuItemSeparator(),
-		settings,
-		update,
-		fyne.NewMenuItemSeparator(),
-		quit,
-	)
-
-	a.menu = fyne.NewMenu("CD-Switcher", items...)
-	a.desk.SetSystemTrayMenu(a.menu)
 }
 
-// refresh rebuilds the menu (and the settings window, if open) on the UI thread
+// refresh rebuilds the menu and the open panel on the UI thread
 // from a background goroutine.
 func (a *app) refresh() {
 	fyne.Do(func() {
 		a.buildAndSetMenu()
-		if a.settingsWin != nil {
-			a.settingsWin.SetContent(a.settingsContent())
-		}
 	})
-}
-
-// openSettings shows the (reused) settings window. Runs on the UI thread as a
-// menu action.
-func (a *app) openSettings() {
-	if a.settingsWin == nil {
-		w := a.fyneApp.NewWindow("Settings")
-		w.Resize(fyne.NewSize(780, 760))
-		// Closing the window must not quit the app (the tray lives on).
-		w.SetCloseIntercept(w.Hide)
-		a.settingsWin = w
-	}
-	a.settingsWin.SetContent(a.settingsContent())
-	a.settingsWin.Show()
-	a.settingsWin.RequestFocus()
-	go a.refreshStats(statsMinAge)
 }
 
 // statsInterval is the background usage-stats poll cadence. The endpoint is
@@ -354,7 +338,7 @@ func (a *app) openSettings() {
 const statsInterval = 5 * time.Minute
 
 // statsMinAge skips refetching a profile whose cached stats are still this
-// fresh, so opening Settings repeatedly doesn't spam the endpoint.
+// fresh, so repeated refreshes don't spam the endpoint.
 const statsMinAge = 60 * time.Second
 
 // restorePollInterval is how often side-by-side windows are checked for having
@@ -601,12 +585,14 @@ func (a *app) updateMenuItem() *fyne.MenuItem {
 }
 
 // refreshStats fetches usage stats for every profile not refreshed within
-// minAge, concurrently, then repaints the menu/settings window once.
+// minAge, concurrently, then repaints the menu and panel once.
 func (a *app) refreshStats(minAge time.Duration) {
 	if !a.statsRefreshing.CompareAndSwap(false, true) {
 		return
 	}
 	defer a.statsRefreshing.Store(false)
+	a.refreshOtherQuotas(minAge)
+
 	a.mu.Lock()
 	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	a.mu.Unlock()
@@ -622,6 +608,7 @@ func (a *app) refreshStats(minAge time.Duration) {
 		pending = append(pending, p.ID)
 	}
 	if len(pending) == 0 {
+		a.refresh()
 		return
 	}
 
@@ -656,6 +643,26 @@ func (a *app) refreshOneStat(id string) {
 		a.setStatEntry(id, statEntry{err: err})
 		return
 	}
+	// Claude Code reports this account's limits on every response once its
+	// statusline hook is installed. A recent reading saves the API call, and
+	// an older one still beats an API failure.
+	account, org := usage.AccountFromCacheKey(cred.CacheKey)
+	snap, haveSnap := ratelimits.Read(a.store.Root(), account, org)
+	if haveSnap && account != "" && snap.Email != "" {
+		a.statsMu.Lock()
+		e := a.statsCache[id]
+		e.email = snap.Email
+		if a.statsCache == nil {
+			a.statsCache = map[string]statEntry{}
+		}
+		a.statsCache[id] = e
+		a.statsMu.Unlock()
+	}
+	if haveSnap && account != "" && time.Since(snap.At) < statsInterval {
+		a.useClaudeCodeReading(id, cred.SubscriptionType, cred.RateLimitTier, snap)
+		return
+	}
+
 	expiring := !cred.ExpiresAt.IsZero() && time.Until(cred.ExpiresAt) < 2*time.Minute
 	if expiring && cred.RefreshToken != "" && !inUse && secret.CanStoreRefreshed() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -680,6 +687,13 @@ func (a *app) refreshOneStat(id string) {
 	stats, err := a.usageClient.Fetch(ctx, cred.Token)
 	if err != nil {
 		logf("stats: fetch failed for %q: %v", id, err)
+		a.statsMu.Lock()
+		prev := a.statsCache[id]
+		a.statsMu.Unlock()
+		if haveSnap && account != "" && snap.At.After(prev.fetchedAt) {
+			a.useClaudeCodeReading(id, cred.SubscriptionType, cred.RateLimitTier, snap)
+			return
+		}
 		a.setStatEntry(id, statEntry{err: err})
 		return
 	}
@@ -688,7 +702,24 @@ func (a *app) refreshOneStat(id string) {
 		stats: stats, fetchedAt: now,
 		plan: cred.SubscriptionType, tier: cred.RateLimitTier,
 	})
+	a.recordStats(id, stats, now)
+}
 
+// useClaudeCodeReading stores a statusline reading as the account's stats,
+// keeping the model meters and spend from the last API fetch.
+func (a *app) useClaudeCodeReading(id, plan, tier string, snap ratelimits.Snapshot) {
+	a.statsMu.Lock()
+	prev := a.statsCache[id]
+	a.statsMu.Unlock()
+	stats := prev.stats.WithWindows(snap.FiveHour.Percent, snap.FiveHour.ResetsAt, snap.FiveHour.Present,
+		snap.SevenDay.Percent, snap.SevenDay.ResetsAt, snap.SevenDay.Present)
+	a.setStatEntry(id, statEntry{stats: stats, fetchedAt: snap.At, plan: plan, tier: tier, fromClaudeCode: true, email: snap.Email})
+	a.recordStats(id, stats, snap.At)
+}
+
+// recordStats keeps the history and daily peaks and runs the alerts and
+// auto-switch for a fresh reading.
+func (a *app) recordStats(id string, stats usage.Stats, now time.Time) {
 	sample := usage.Sample{Time: now, FiveHour: stats.FiveHour.Utilization, SevenDay: stats.SevenDay.Utilization}
 	if err := usage.AppendHistory(a.historyPath(id), sample); err != nil {
 		logf("stats: append history failed for %q: %v", id, err)
@@ -747,7 +778,8 @@ func (a *app) maybeAutoSwitch(id string, stats usage.Stats) {
 	}
 	// Only move to an account that is itself under the threshold, or two
 	// busy accounts would keep switching back and forth.
-	if best, load, ok := a.freest(profiles); !ok || best == id || load.Session >= float64(threshold) {
+	target, ok := a.autoSwitchTarget(profiles, id, float64(threshold))
+	if !ok {
 		return
 	}
 
@@ -763,8 +795,34 @@ func (a *app) maybeAutoSwitch(id string, stats usage.Stats) {
 	a.alerted[key] = struct{}{}
 	a.alertMu.Unlock()
 
-	logf("auto-switch: %q hit %d%% session usage, switching to the most available profile", id, threshold)
-	a.runOp(a.doUseFreest)
+	logf("auto-switch: %q hit %d%% session usage, switching to %q", id, threshold, target)
+	a.runOp(func() error { return a.doSwitch(target) })
+}
+
+// autoSwitchTarget picks the account auto-switch moves to, by the chosen
+// strategy, among accounts other than from that are not excluded and are
+// under the threshold.
+func (a *app) autoSwitchTarget(profiles []profile.Profile, from string, threshold float64) (string, bool) {
+	a.mu.Lock()
+	strategy := a.cfg.AutoSwitchStrategy
+	a.mu.Unlock()
+	loads := a.loads(profiles)
+	for i, p := range profiles {
+		if p.ID == from || p.NoAutoSwitch {
+			loads[i].Ready = false
+		}
+	}
+	var best usage.AccountLoad
+	var ok bool
+	if strategy == profile.StrategyConsumeFirst {
+		best, ok = usage.ConsumeFirst(loads, threshold)
+	} else {
+		best, ok = usage.Freest(loads)
+	}
+	if !ok || best.Session >= threshold {
+		return "", false
+	}
+	return best.ID, true
 }
 
 // historyPath is where a profile's usage-percentage history is persisted,
@@ -794,6 +852,10 @@ func (a *app) setStatEntry(id string, next statEntry) {
 			next.plan, next.tier = prev.plan, prev.tier
 		}
 	}
+	if next.email == "" {
+		next.email = a.statsCache[id].email
+	}
+	next.stats = next.stats.Rolled(time.Now())
 	if a.statsCache == nil {
 		a.statsCache = map[string]statEntry{}
 	}
@@ -818,6 +880,9 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 	if e.tier != "" {
 		head += " · " + e.tier
 	}
+	if e.email != "" && !strings.EqualFold(e.email, labelOf(a, id)) {
+		head = strings.TrimSuffix(e.email+" · "+head, " · ")
+	}
 	if e.err != nil {
 		if head != "" {
 			head += " · "
@@ -836,16 +901,16 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 		}
 	}
 	items = append(items,
-		gaugeItem(session, fh.Utilization, a.openSettings),
+		gaugeItem(session, fh.Utilization, a.onTrayTap),
 		gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s",
-			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2")), sd.Utilization, a.openSettings),
+			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2")), sd.Utilization, a.onTrayTap),
 	)
 	// Accounts with Fable get its own weekly limit; the other model meters
 	// stay in Settings.
 	for _, m := range e.stats.Meters() {
 		if strings.Contains(strings.ToLower(m.Label), "fable") {
 			items = append(items, gaugeItem(fmt.Sprintf("%s %.0f%% · resets %s",
-				m.Label, m.Utilization, m.ResetsAt.Local().Format("Mon Jan 2")), m.Utilization, a.openSettings))
+				m.Label, m.Utilization, m.ResetsAt.Local().Format("Mon Jan 2")), m.Utilization, a.onTrayTap))
 		}
 	}
 	if short := e.stats.Tokens.Short(); short != "" {
@@ -855,6 +920,14 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 		items = append(items, dimItem(spend))
 	}
 	return items
+}
+
+// labelOf is the label the user gave a profile.
+func labelOf(a *app, id string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p, _ := a.cfg.Find(id)
+	return p.Label
 }
 
 func dimItem(label string) *fyne.MenuItem {
@@ -1060,17 +1133,21 @@ func (a *app) doSwitch(id string) error {
 	p, _ := a.cfg.Find(id)
 	logf("switching to %q (id=%s)", p.Label, id)
 	from := a.cfg.ActiveProfile
-	if a.cfg.SwitchCLI && from != "" {
+	switchCLI := a.cfg.SwitchCLI
+	if switchCLI && from != "" {
+		// Without a saved copy, restoring the next login would lose this one.
 		if err := clicreds.Save(from); err != nil {
-			logf("save CLI login for %q: %v", from, err)
+			logf("save CLI login for %q, leaving the CLI login as it is: %v", from, err)
+			switchCLI = false
 		}
 	}
 	if err := a.sw.SwitchTo(a.cfg, id, true); err != nil {
 		return err
 	}
-	if a.cfg.SwitchCLI {
-		if _, err := clicreds.Restore(id); err != nil {
+	if switchCLI {
+		if _, err := clicreds.Restore(a.store.Root(), id); err != nil {
 			logf("restore CLI login for %q: %v", p.Label, err)
+			_ = zenity.Notify("Claude Code login was not switched: " + err.Error())
 		}
 	}
 	logf("switched to %q", p.Label)
@@ -1137,24 +1214,30 @@ func (a *app) doMove(id string, delta int) error {
 // freest is the profile with the lowest session utilization among accounts
 // that have a successful usage reading.
 func (a *app) freest(profiles []profile.Profile) (string, usage.AccountLoad, bool) {
-	loads := make([]usage.AccountLoad, len(profiles))
-	a.statsMu.Lock()
-	for i, p := range profiles {
-		e, ok := a.statsCache[p.ID]
-		loads[i] = usage.AccountLoad{
-			ID:       p.ID,
-			Session:  e.stats.FiveHour.Utilization,
-			Week:     e.stats.SevenDay.Utilization,
-			ResetsIn: time.Until(e.stats.FiveHour.ResetsAt),
-			Ready:    ok && !e.fetchedAt.IsZero(),
-		}
-	}
-	a.statsMu.Unlock()
-	best, ok := usage.Freest(loads)
+	best, ok := usage.Freest(a.loads(profiles))
 	if !ok {
 		return "", usage.AccountLoad{}, false
 	}
 	return best.ID, best, true
+}
+
+// loads is each profile's latest session and weekly usage.
+func (a *app) loads(profiles []profile.Profile) []usage.AccountLoad {
+	loads := make([]usage.AccountLoad, len(profiles))
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	for i, p := range profiles {
+		e, ok := a.statsCache[p.ID]
+		loads[i] = usage.AccountLoad{
+			ID:           p.ID,
+			Session:      e.stats.FiveHour.Utilization,
+			Week:         e.stats.SevenDay.Utilization,
+			ResetsIn:     time.Until(e.stats.FiveHour.ResetsAt),
+			WeekResetsIn: time.Until(e.stats.SevenDay.ResetsAt),
+			Ready:        ok && !e.fetchedAt.IsZero(),
+		}
+	}
+	return loads
 }
 
 func (a *app) freestMenuItem(profiles []profile.Profile, activeID string, hasActive, parallel bool) (*fyne.MenuItem, bool) {
@@ -1288,6 +1371,13 @@ func (a *app) doSetAutoSwitchAt(percent int) error {
 }
 
 func (a *app) doSetSwitchCLI(on bool) error {
+	// Save the current CLI login under the active account first, so the next
+	// switch back to it restores that login instead of signing the CLI out.
+	if on && !a.cfg.SwitchCLI && a.cfg.ActiveProfile != "" {
+		if err := clicreds.Save(a.cfg.ActiveProfile); err != nil {
+			return fmt.Errorf("save the current Claude Code login: %w", err)
+		}
+	}
 	a.cfg.SwitchCLI = on
 	return a.store.Save(a.cfg)
 }
@@ -1537,7 +1627,7 @@ func (a *app) firstRunAskLoginIfNeeded() {
 	}
 
 	err := zenity.Question(
-		"Open CD-Switcher automatically when you log in?\n\nYou can change this later in Settings.",
+		"Open CD-Switcher automatically when you log in?\n\nYou can change this later on the General tab.",
 		zenity.Title("CD-Switcher setup"),
 		zenity.OKLabel("Open at login"),
 		zenity.CancelLabel("Not now"),
@@ -1591,8 +1681,12 @@ func spinnerResources() []fyne.Resource {
 // the app runs detached from a terminal are diagnosable after the fact.
 var logger *log.Logger
 
+// logPath is the log file, shown on the Settings Logs page.
+var logPath string
+
 func initLog(root string) {
-	f, err := os.OpenFile(filepath.Join(root, "cd-switcher.log"),
+	logPath = filepath.Join(root, "cd-switcher.log")
+	f, err := os.OpenFile(logPath,
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return // logging is best-effort

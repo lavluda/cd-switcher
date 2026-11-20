@@ -76,6 +76,10 @@ var swatchPalette = []color.RGBA{
 	{0x9A, 0x5B, 0x8A, 0xFF}, // plum
 }
 
+// SwatchColor is profile i's palette colour, for avatars that match its
+// tray swatch.
+func SwatchColor(i int) color.Color { return swatchPalette[i%len(swatchPalette)] }
+
 // PaletteSize is how many swatch colours profiles can choose from.
 func PaletteSize() int { return len(swatchPalette) }
 

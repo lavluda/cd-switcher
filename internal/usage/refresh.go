@@ -98,3 +98,13 @@ func ScopeFromCacheKey(key string) string {
 	}
 	return hostAndScope[colon+1:]
 }
+
+// AccountFromCacheKey returns the account and organization UUIDs at the
+// front of an oauth:tokenCacheV2 key, or empty strings when the key has none.
+func AccountFromCacheKey(key string) (account, org string) {
+	parts := strings.SplitN(key, ":", 3)
+	if len(parts) < 3 || !orgIDPattern.MatchString(parts[0]) || !orgIDPattern.MatchString(parts[1]) {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}

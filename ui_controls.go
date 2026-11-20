@@ -20,6 +20,7 @@ type toggleSwitch struct {
 	widget.BaseWidget
 	on       bool
 	disabled bool
+	tint     color.Color // on-state colour; the theme accent when nil
 	onChange func(bool)
 }
 
@@ -88,6 +89,9 @@ func (r *toggleRenderer) Refresh() {
 		r.track.FillColor = fadeColor(c, 0.6)
 	case r.t.on:
 		r.track.FillColor = uitheme.Accent
+		if r.t.tint != nil {
+			r.track.FillColor = r.t.tint
+		}
 	default:
 		r.track.FillColor = uitheme.CurrentTrackOff()
 	}
@@ -113,134 +117,6 @@ func fadeColor(c color.Color, alpha float32) color.Color {
 	return color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(255 * alpha)}
 }
 
-// segmentedControl is a single pill divided into equal-width options, one
-// highlighted with the accent fill — the native macOS segmented-control look,
-// in place of two separate full-width buttons side by side.
-type segmentedControl struct {
-	widget.BaseWidget
-	options  []string
-	selected int
-	onChange func(int)
-}
-
-func newSegmentedControl(options []string, selected int, onChange func(int)) *segmentedControl {
-	s := &segmentedControl{options: options, selected: selected, onChange: onChange}
-	s.ExtendBaseWidget(s)
-	return s
-}
-
-func (s *segmentedControl) SetSelected(i int) {
-	if i == s.selected {
-		return
-	}
-	s.selected = i
-	s.Refresh()
-}
-
-func (s *segmentedControl) MinSize() fyne.Size { return fyne.NewSize(240, 36) }
-
-// Cursor marks the control as clickable when hovered.
-func (s *segmentedControl) Cursor() desktop.Cursor { return desktop.PointerCursor }
-
-func (s *segmentedControl) Tapped(e *fyne.PointEvent) {
-	n := len(s.options)
-	if n == 0 {
-		return
-	}
-	segW := s.Size().Width / float32(n)
-	idx := int(e.Position.X / segW)
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= n {
-		idx = n - 1
-	}
-	if idx == s.selected {
-		return
-	}
-	s.selected = idx
-	s.Refresh()
-	if s.onChange != nil {
-		s.onChange(idx)
-	}
-}
-
-func (s *segmentedControl) CreateRenderer() fyne.WidgetRenderer {
-	track := canvas.NewRectangle(color.Transparent)
-	pill := canvas.NewRectangle(uitheme.Accent)
-	labels := make([]*canvas.Text, len(s.options))
-	for i, opt := range s.options {
-		labels[i] = canvas.NewText(opt, color.Black)
-		labels[i].Alignment = fyne.TextAlignCenter
-		labels[i].TextStyle = fyne.TextStyle{Bold: true}
-	}
-	r := &segmentedRenderer{s: s, track: track, pill: pill, labels: labels}
-	r.Refresh()
-	return r
-}
-
-type segmentedRenderer struct {
-	s      *segmentedControl
-	track  *canvas.Rectangle
-	pill   *canvas.Rectangle
-	labels []*canvas.Text
-}
-
-func (r *segmentedRenderer) Layout(size fyne.Size) {
-	r.track.Resize(size)
-	r.track.CornerRadius = size.Height / 2
-
-	n := len(r.s.options)
-	if n == 0 {
-		return
-	}
-	segW := size.Width / float32(n)
-
-	const pad = 3
-	pillX := float32(r.s.selected)*segW + pad
-	r.pill.Move(fyne.NewPos(pillX, pad))
-	r.pill.Resize(fyne.NewSize(segW-pad*2, size.Height-pad*2))
-	r.pill.CornerRadius = (size.Height - pad*2) / 2
-
-	for i, l := range r.labels {
-		l.TextSize = 13
-		sz := l.MinSize()
-		x := float32(i)*segW + (segW-sz.Width)/2
-		y := (size.Height - sz.Height) / 2
-		l.Move(fyne.NewPos(x, y))
-		l.Resize(sz)
-	}
-}
-
-func (r *segmentedRenderer) MinSize() fyne.Size { return r.s.MinSize() }
-
-func (r *segmentedRenderer) Refresh() {
-	r.track.FillColor = uitheme.CurrentTrackOff()
-	r.track.Refresh()
-	r.pill.FillColor = uitheme.Accent
-	r.pill.Refresh()
-	for i, l := range r.labels {
-		if i == r.s.selected {
-			l.Color = color.White
-		} else {
-			l.Color = uitheme.CurrentForeground()
-		}
-		l.Refresh()
-	}
-	r.Layout(r.s.Size())
-}
-
-func (r *segmentedRenderer) Objects() []fyne.CanvasObject {
-	objs := make([]fyne.CanvasObject, 0, len(r.labels)+2)
-	objs = append(objs, r.track, r.pill)
-	for _, l := range r.labels {
-		objs = append(objs, l)
-	}
-	return objs
-}
-
-func (r *segmentedRenderer) Destroy() {}
-
 // vbox stacks items vertically with an explicit gap between them, instead of
 // container.NewVBox's fixed theme.Padding() spacing. Plain NewVBox was
 // quietly doubling up with hand-placed vGap() spacers (each vGap added its
@@ -249,27 +125,4 @@ func (r *segmentedRenderer) Destroy() {}
 // source of space, so callers can size it deliberately.
 func vbox(gap float32, items ...fyne.CanvasObject) fyne.CanvasObject {
 	return container.New(layout.NewCustomPaddedVBoxLayout(gap), items...)
-}
-
-// badge is a small tinted capsule label — an "Active" or "Most room" marker —
-// in place of plain bold accent-colored text, matching Claude's soft-wash
-// status chips instead of a solid fill.
-func badge(text string) fyne.CanvasObject {
-	lbl := canvas.NewText(text, uitheme.Accent)
-	lbl.TextStyle = fyne.TextStyle{Bold: true}
-	lbl.TextSize = 11
-
-	bg := canvas.NewRectangle(uitheme.AccentSoft)
-	bg.CornerRadius = 8
-	padded := container.New(layout.NewCustomPaddedLayout(3, 3, 10, 10), lbl)
-	return container.NewStack(bg, padded)
-}
-
-// headingText renders a canvas.Text sized and colored for a page title —
-// bigger and bolder than any Fyne stock label, for the "Settings" headline.
-func headingText(s string) *canvas.Text {
-	t := canvas.NewText(s, uitheme.CurrentForeground())
-	t.TextStyle = fyne.TextStyle{Bold: true}
-	t.TextSize = 24
-	return t
 }

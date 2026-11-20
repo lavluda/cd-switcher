@@ -12,6 +12,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/lavluda/cd-switcher/internal/instructions"
+	"github.com/lavluda/cd-switcher/internal/mcp"
+	"github.com/lavluda/cd-switcher/internal/provider"
 )
 
 // Profile is one captured Claude account.
@@ -21,7 +25,31 @@ type Profile struct {
 	CreatedAt time.Time `json:"createdAt"`
 	// Color is a swatch palette index plus one; 0 means "by position".
 	Color int `json:"color,omitempty"`
+	// NoAutoSwitch keeps auto-switch from ever choosing this account.
+	NoAutoSwitch bool `json:"noAutoSwitch,omitempty"`
 }
+
+// CodexAccount is one saved Codex CLI login.
+type CodexAccount struct {
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	Email     string    `json:"email,omitempty"`
+	Plan      string    `json:"plan,omitempty"`
+	AccountID string    `json:"accountId,omitempty"`
+	AddedAt   time.Time `json:"addedAt"`
+}
+
+// SkillSource records where an installed skill came from, for updates.
+type SkillSource struct {
+	Source string `json:"source"` // owner/repo/path[@ref]
+	Hash   string `json:"hash,omitempty"`
+}
+
+// Strategies for choosing the account auto-switch moves to.
+const (
+	StrategyMostRoom     = ""              // the account with the most session room
+	StrategyConsumeFirst = "consume-first" // the account whose weekly limit resets soonest
+)
 
 // ColorIndex is the palette index for this profile, which sits at position pos
 // in the list.
@@ -82,6 +110,67 @@ type Config struct {
 	// waiting on a network call.
 	LatestVersion    string `json:"latestVersion,omitempty"`
 	LatestVersionURL string `json:"latestVersionURL,omitempty"`
+
+	// AutoSwitchStrategy picks the account auto-switch moves to.
+	AutoSwitchStrategy string `json:"autoSwitchStrategy,omitempty"`
+
+	// CodexAccounts are saved Codex CLI logins; ActiveCodex is the one in use.
+	CodexAccounts []CodexAccount `json:"codexAccounts,omitempty"`
+	ActiveCodex   string         `json:"activeCodex,omitempty"`
+
+	// Providers are model APIs for Claude Code and Codex. ActiveProvider maps
+	// a tool to its provider ID; a missing entry is the official setup.
+	Providers      []provider.Provider `json:"providers,omitempty"`
+	ActiveProvider map[string]string   `json:"activeProvider,omitempty"`
+	ProviderSaved  provider.Saved      `json:"providerSaved,omitempty"`
+
+	// MCPServers is the shared MCP list. MCPImported marks that the tools'
+	// existing servers were read in once.
+	MCPServers  []mcp.Server `json:"mcpServers,omitempty"`
+	MCPImported bool         `json:"mcpImported,omitempty"`
+
+	// SkillSources maps an installed skill to where it came from.
+	SkillSources map[string]SkillSource `json:"skillSources,omitempty"`
+
+	// Instructions are saved global instruction sets. ActiveInstructions is
+	// the one written to the tools in InstructionTools.
+	Instructions       []instructions.Entry `json:"instructions,omitempty"`
+	ActiveInstructions string               `json:"activeInstructions,omitempty"`
+	InstructionTools   map[string]bool      `json:"instructionTools,omitempty"`
+	InstructionsLoaded bool                 `json:"instructionsLoaded,omitempty"`
+
+	// Terminal is the app "Open Claude Code" and "Open Codex" use.
+	Terminal string `json:"terminal,omitempty"`
+}
+
+// FindCodex returns the saved Codex account with id.
+func (c *Config) FindCodex(id string) (CodexAccount, bool) {
+	for _, x := range c.CodexAccounts {
+		if x.ID == id {
+			return x, true
+		}
+	}
+	return CodexAccount{}, false
+}
+
+// FindProvider returns the provider with id.
+func (c *Config) FindProvider(id string) (provider.Provider, bool) {
+	for _, p := range c.Providers {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return provider.Provider{}, false
+}
+
+// NewHubID returns an ID derived from label that none of taken uses.
+func NewHubID(label string, taken func(string) bool) string {
+	base := slug(label)
+	id := base
+	for n := 2; taken(id); n++ {
+		id = fmt.Sprintf("%s-%d", base, n)
+	}
+	return id
 }
 
 // AutoCheckUpdatesEnabled reports whether the daily background update check
@@ -290,16 +379,13 @@ var slugInvalid = regexp.MustCompile(`[^a-z0-9]+`)
 // NewID derives a unique, filesystem-safe id from a human label, disambiguating
 // against ids already present in the config.
 func (c *Config) NewID(label string) string {
-	base := slugInvalid.ReplaceAllString(strings.ToLower(label), "-")
-	base = strings.Trim(base, "-")
+	return NewHubID(label, func(id string) bool { _, exists := c.Find(id); return exists })
+}
+
+func slug(label string) string {
+	base := strings.Trim(slugInvalid.ReplaceAllString(strings.ToLower(label), "-"), "-")
 	if base == "" {
 		base = "account"
 	}
-	id := base
-	for i := 2; ; i++ {
-		if _, exists := c.Find(id); !exists {
-			return id
-		}
-		id = fmt.Sprintf("%s-%d", base, i)
-	}
+	return base
 }

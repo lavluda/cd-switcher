@@ -3,6 +3,7 @@ package profile
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -71,8 +72,8 @@ func TestCaptureSkipsCacheAndCopiesNested(t *testing.T) {
 }
 
 func TestCaptureKeepsOldSnapshotWhenCopyFails(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can read mode-0 files")
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("root, and Windows, can read mode-0 files")
 	}
 	dir := t.TempDir()
 	live, snap := filepath.Join(dir, "live"), filepath.Join(dir, "snap")

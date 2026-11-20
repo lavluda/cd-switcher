@@ -4,6 +4,8 @@ go 1.26.0
 
 require (
 	fyne.io/fyne/v2 v2.7.4
+	fyne.io/systray v1.12.1
+	github.com/BurntSushi/toml v1.5.0
 	github.com/ncruces/zenity v0.10.4
 	github.com/shirou/gopsutil/v3 v3.24.5
 	golang.org/x/crypto v0.59.0
@@ -11,8 +13,6 @@ require (
 )
 
 require (
-	fyne.io/systray v1.12.1 // indirect
-	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/akavel/rsrc v0.10.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dchest/jsmin v0.0.0-20220218165748-59f39799265f // indirect
