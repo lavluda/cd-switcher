@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	"github.com/ncruces/zenity"
 
 	"github.com/lavluda/cd-switcher/internal/agents"
 	"github.com/lavluda/cd-switcher/internal/harness"
@@ -52,7 +51,7 @@ func (a *app) doSetInbox(on bool) error {
 		codex = codex || tool == harness.Codex
 	}
 	if codex {
-		_ = zenity.Notify("Agent inbox is on. In Codex, run /hooks once and trust CD-Switcher's hooks.")
+		a.fyneApp.SendNotification(fyne.NewNotification("Agent inbox enabled", "In Codex, run /hooks once and trust CD-Switcher's hooks."))
 	}
 	return nil
 }
@@ -66,11 +65,21 @@ func (a *app) watchInbox() {
 		if err != nil {
 			return nil
 		}
+		inboxOn := false
 		for _, tool := range agents.Tools {
-			if agents.Installed(tool) {
-				if err := agents.Install(tool, exe); err != nil {
-					logf("agent hooks %s: %v", tool, err)
-				}
+			if tool == harness.OpenCode || !agents.Installed(tool) {
+				continue
+			}
+			inboxOn = true
+			if err := agents.Install(tool, exe); err != nil {
+				logf("agent hooks %s: %v", tool, err)
+			}
+		}
+		// OpenCode is a plugin rather than a hooks file. If the inbox is
+		// already on, install it without waiting for the switch to be toggled.
+		if inboxOn && harness.Installed(harness.OpenCode, "") {
+			if err := agents.Install(harness.OpenCode, exe); err != nil {
+				logf("agent hooks opencode: %v", err)
 			}
 		}
 		return nil
@@ -90,7 +99,9 @@ func (a *app) watchInbox() {
 			}
 			changed = true
 			if !first && (s.State == agents.Waiting || s.State == agents.Done) && (!had || old.State != s.State) {
-				_ = zenity.Notify(inboxNotice(s))
+				if !sendInboxNotification(inboxNotice(s), s.App) {
+					a.fyneApp.SendNotification(fyne.NewNotification("Agent inbox", inboxNotice(s)))
+				}
 			}
 		}
 		seen, first = next, false

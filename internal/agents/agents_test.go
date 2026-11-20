@@ -52,9 +52,12 @@ func TestInstallKeepsOtherHooks(t *testing.T) {
 	harness.Home = func() string { return h }
 	t.Cleanup(func() { harness.Home = old })
 	t.Setenv("CODEX_HOME", filepath.Join(h, ".codex"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
 	settings := harness.ClaudeSettings()
 	os.MkdirAll(filepath.Dir(settings), 0o700)
 	os.WriteFile(settings, []byte(`{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}`), 0o600)
+	os.MkdirAll(filepath.Join(h, ".cursor"), 0o700)
+	os.WriteFile(filepath.Join(h, ".cursor", "hooks.json"), []byte(`{"hooks":{"stop":[{"command":"./audit.sh"}]}}`), 0o600)
 
 	exe := "/Applications/CD-Switcher.app/Contents/MacOS/cd-switcher"
 	for _, tool := range Tools {
@@ -76,6 +79,11 @@ func TestInstallKeepsOtherHooks(t *testing.T) {
 	if strings.Contains(string(codex), "Notification") || !strings.Contains(string(codex), "PermissionRequest") {
 		t.Fatalf("codex events:\n%s", codex)
 	}
+	cursor, _ := os.ReadFile(filepath.Join(h, ".cursor", "hooks.json"))
+	if !strings.Contains(string(cursor), `"version": 1`) || strings.Contains(string(cursor), `"type"`) ||
+		!strings.Contains(string(cursor), "./audit.sh") || strings.Count(string(cursor), Arg) != len(events[harness.Cursor]) {
+		t.Fatalf("cursor hooks:\n%s", cursor)
+	}
 
 	for _, tool := range Tools {
 		if err := Uninstall(tool); err != nil {
@@ -92,5 +100,39 @@ func TestInstallKeepsOtherHooks(t *testing.T) {
 	codex, _ = os.ReadFile(filepath.Join(h, ".codex", "hooks.json"))
 	if strings.Contains(string(codex), "hooks") {
 		t.Fatalf("empty hooks object left behind:\n%s", codex)
+	}
+	cursor, _ = os.ReadFile(filepath.Join(h, ".cursor", "hooks.json"))
+	if strings.Contains(string(cursor), Arg) || !strings.Contains(string(cursor), "./audit.sh") {
+		t.Fatalf("cursor uninstall:\n%s", cursor)
+	}
+}
+
+func TestCursorSession(t *testing.T) {
+	state := t.TempDir()
+	now := time.Now()
+	run := func(json string) {
+		t.Helper()
+		RunHook(state, harness.Cursor, strings.NewReader(json))
+	}
+	run(`{"hook_event_name":"beforeSubmitPrompt","conversation_id":"c1","workspace_roots":["/src/app"]}`)
+	got := List(state, now)
+	if len(got) != 1 || got[0].State != Running || got[0].Cwd != "/src/app" || got[0].Project() != "app" {
+		t.Fatalf("prompt: %+v", got)
+	}
+	run(`{"hook_event_name":"postToolUse","conversation_id":"c1","cwd":"/src/app"}`)
+	run(`{"hook_event_name":"afterAgentResponse","conversation_id":"c1","text":"All tests pass."}`)
+	run(`{"hook_event_name":"stop","conversation_id":"c1","status":"completed"}`)
+	got = List(state, now)
+	if len(got) != 1 || got[0].State != Done || got[0].Message != "All tests pass." {
+		t.Fatalf("stop keeps the reply: %+v", got[0])
+	}
+	run(`{"hook_event_name":"stop","conversation_id":"c2","status":"error"}`)
+	got = List(state, now)
+	if got[0].ID != "c2" || got[0].State != Done || got[0].Message != "Stopped on an error" {
+		t.Fatalf("error stop: %+v", got[0])
+	}
+	run(`{"hook_event_name":"sessionEnd","session_id":"c1","reason":"user_close"}`)
+	if got = List(state, now); len(got) != 1 || got[0].ID != "c2" {
+		t.Fatalf("session end: %+v", got)
 	}
 }

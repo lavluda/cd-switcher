@@ -24,7 +24,6 @@ import (
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/theme"
 	"github.com/ncruces/zenity"
 
 	"github.com/lavluda/cd-switcher/internal/agents"
@@ -75,16 +74,15 @@ type app struct {
 	// requests racing to write a.cfg.
 	updateChecking bool
 
-	fyneApp     fyne.App
-	desk        desktop.App
-	menu        *fyne.Menu
-	settingsWin fyne.Window
-	// settingsTabIndex is the Settings window's currently selected tab.
-	// settingsContent() rebuilds the whole tab widget on every refresh (a
-	// stats poll, a switch, a toggle), so this is what keeps the window on
-	// the tab the user is looking at instead of snapping back to the first
-	// one each time. UI-thread only, like settingsWin.
-	settingsTabIndex int
+	fyneApp fyne.App
+	desk    desktop.App
+	menu    *fyne.Menu
+	// panelWin is the menu-bar panel. panelOpen tracks it where the OS
+	// cannot report visibility; on macOS visibility is read from the window.
+	panelWin  fyne.Window
+	panelOpen bool
+	// trayTapAt is the last tray tap, used to drop the duplicate tap one click can send.
+	trayTapAt time.Time
 	// usage is the Usage page's log scanner and filter choices.
 	usage usageState
 
@@ -166,7 +164,7 @@ func main() {
 		}
 		return
 	}
-	// Claude Code and Codex run it as a hook on agent events; same rules.
+	// Claude Code, Codex, Cursor and OpenCode run it as a hook on agent events; same rules.
 	if len(os.Args) > 2 && os.Args[1] == agents.Arg {
 		if store, err := profile.NewStore(); err == nil {
 			agents.RunHook(store.Root(), os.Args[2], os.Stdin)
@@ -181,8 +179,8 @@ func main() {
 		}
 	}
 	a.fyneApp = fyneapp.New()
-	// Restyles the Settings window only — the system tray menu and zenity
-	// dialogs are native OS chrome and don't go through Fyne's theme.
+	initInboxNotifications()
+	// Restyles Fyne surfaces. Zenity dialogs stay native OS chrome.
 	a.fyneApp.Settings().SetTheme(uitheme.New())
 
 	desk, ok := a.fyneApp.(desktop.App)
@@ -308,143 +306,31 @@ func linkArg() string {
 	return ""
 }
 
-// buildAndSetMenu rebuilds the tray menu from current state and installs it.
+// buildAndSetMenu rebuilds the tray icon and, when it is open, the menu-bar panel.
 // It must run on the UI thread (called directly pre-Run, via fyne.Do after).
 func (a *app) buildAndSetMenu() {
-	// Snapshot everything the menu needs under the lock: the worker goroutine
+	// Snapshot everything the icon needs under the lock: the worker goroutine
 	// mutates a.cfg's slice/fields concurrently, so we must not read them after
 	// unlocking.
 	a.mu.Lock()
 	profiles := append([]profile.Profile(nil), a.cfg.Profiles...)
 	active, hasActive := a.cfg.Active()
-	pending := a.pendingLogin
-	busy := a.busy
-	parallel := a.cfg.IsParallel()
 	showMultiple := a.cfg.ShowMultipleProfiles
 	a.mu.Unlock()
 
-	running := map[string]bool{}
-	if parallel {
-		if dirs, err := claude.RunningDataDirs(); err == nil {
-			for _, dir := range dirs {
-				running[dir] = true
-			}
-		}
-	}
-
 	a.updateTrayIcon(profiles, active.ID, hasActive, showMultiple)
-
-	status := fyne.NewMenuItem("", nil)
-	status.Disabled = true
-	switch {
-	case busy:
-		status.Label = "⏳ Working…"
-	case pending:
-		status.Label = "Waiting for new login…"
-	case parallel:
-		status.Label = "Side by side"
-	case hasActive:
-		status.Label = "Active: " + active.Label
-	default:
-		status.Label = "No account active"
+	a.ensurePanel()
+	if a.panelShowing() {
+		a.panelWin.SetContent(a.panelContent())
 	}
-
-	items := []*fyne.MenuItem{status, fyne.NewMenuItemSeparator()}
-	if inbox := a.inboxMenuItems(); len(inbox) > 0 {
-		items = append(append(items, inbox...), fyne.NewMenuItemSeparator())
-	}
-
-	for i, p := range profiles {
-		if i > 0 {
-			items = append(items, fyne.NewMenuItemSeparator())
-		}
-		id := p.ID
-		it := fyne.NewMenuItem(p.Label, func() {
-			a.runOp(func() error { return a.doSwitch(id) })
-		})
-		ci := p.ColorIndex(i)
-		it.Icon = fyne.NewStaticResource(fmt.Sprintf("swatch%d.png", ci), icon.Swatch(ci))
-		if parallel {
-			dir, _ := filepath.Abs(a.store.ProfileDir(id))
-			it.Checked = running[filepath.Clean(dir)]
-		} else {
-			it.Checked = hasActive && id == active.ID
-		}
-
-		items = append(items, it)
-		items = append(items, a.statLinesFor(id)...)
-	}
-	if codexItems := a.codexMenuItems(); len(codexItems) > 0 {
-		items = append(items, fyne.NewMenuItemSeparator())
-		items = append(items, codexItems...)
-	}
-	items = append(items, fyne.NewMenuItemSeparator())
-	if item, ok := a.freestMenuItem(profiles, active.ID, hasActive, parallel); ok {
-		items = append(items, item)
-	}
-	refreshItem := fyne.NewMenuItem("Refresh usage", func() { go a.refreshStats(0) })
-	refreshItem.Icon = theme.ViewRefreshIcon()
-	items = append(items, refreshItem)
-
-	if pending {
-		items = append(items, fyne.NewMenuItem("✓ Save this account", func() {
-			a.runOp(a.doSaveAccount)
-		}))
-	} else {
-		add := fyne.NewMenuItem("Add account…", func() {
-			a.runOp(a.doAddAccount)
-		})
-		add.Icon = theme.ContentAddIcon()
-		items = append(items, add)
-	}
-
-	settings := fyne.NewMenuItem("Settings…", a.openSettings)
-	settings.Icon = theme.SettingsIcon()
-	update := a.updateMenuItem()
-	update.Icon = theme.DownloadIcon()
-	quit := fyne.NewMenuItem("Quit", func() { a.fyneApp.Quit() })
-	quit.Icon = theme.LogoutIcon()
-	if tools := a.toolMenuItems(); len(tools) > 0 {
-		items = append(items, fyne.NewMenuItemSeparator())
-		items = append(items, tools...)
-	}
-	items = append(items,
-		fyne.NewMenuItemSeparator(),
-		settings,
-		update,
-		fyne.NewMenuItemSeparator(),
-		quit,
-	)
-
-	a.menu = fyne.NewMenu("CD-Switcher", items...)
-	a.desk.SetSystemTrayMenu(a.menu)
 }
 
-// refresh rebuilds the menu (and the settings window, if open) on the UI thread
+// refresh rebuilds the menu and the open panel on the UI thread
 // from a background goroutine.
 func (a *app) refresh() {
 	fyne.Do(func() {
 		a.buildAndSetMenu()
-		if a.settingsWin != nil {
-			a.settingsWin.SetContent(a.settingsContent())
-		}
 	})
-}
-
-// openSettings shows the (reused) settings window. Runs on the UI thread as a
-// menu action.
-func (a *app) openSettings() {
-	if a.settingsWin == nil {
-		w := a.fyneApp.NewWindow("Settings")
-		w.Resize(fyne.NewSize(860, 720))
-		// Closing the window must not quit the app (the tray lives on).
-		w.SetCloseIntercept(w.Hide)
-		a.settingsWin = w
-	}
-	a.settingsWin.SetContent(a.settingsContent())
-	a.settingsWin.Show()
-	a.settingsWin.RequestFocus()
-	go a.refreshStats(statsMinAge)
 }
 
 // statsInterval is the background usage-stats poll cadence. The endpoint is
@@ -452,7 +338,7 @@ func (a *app) openSettings() {
 const statsInterval = 5 * time.Minute
 
 // statsMinAge skips refetching a profile whose cached stats are still this
-// fresh, so opening Settings repeatedly doesn't spam the endpoint.
+// fresh, so repeated refreshes don't spam the endpoint.
 const statsMinAge = 60 * time.Second
 
 // restorePollInterval is how often side-by-side windows are checked for having
@@ -699,7 +585,7 @@ func (a *app) updateMenuItem() *fyne.MenuItem {
 }
 
 // refreshStats fetches usage stats for every profile not refreshed within
-// minAge, concurrently, then repaints the menu/settings window once.
+// minAge, concurrently, then repaints the menu and panel once.
 func (a *app) refreshStats(minAge time.Duration) {
 	if !a.statsRefreshing.CompareAndSwap(false, true) {
 		return
@@ -969,6 +855,7 @@ func (a *app) setStatEntry(id string, next statEntry) {
 	if next.email == "" {
 		next.email = a.statsCache[id].email
 	}
+	next.stats = next.stats.Rolled(time.Now())
 	if a.statsCache == nil {
 		a.statsCache = map[string]statEntry{}
 	}
@@ -1014,16 +901,16 @@ func (a *app) statLinesFor(id string) []*fyne.MenuItem {
 		}
 	}
 	items = append(items,
-		gaugeItem(session, fh.Utilization, a.openSettings),
+		gaugeItem(session, fh.Utilization, a.onTrayTap),
 		gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s",
-			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2")), sd.Utilization, a.openSettings),
+			sd.Utilization, sd.ResetsAt.Local().Format("Mon Jan 2")), sd.Utilization, a.onTrayTap),
 	)
 	// Accounts with Fable get its own weekly limit; the other model meters
 	// stay in Settings.
 	for _, m := range e.stats.Meters() {
 		if strings.Contains(strings.ToLower(m.Label), "fable") {
 			items = append(items, gaugeItem(fmt.Sprintf("%s %.0f%% · resets %s",
-				m.Label, m.Utilization, m.ResetsAt.Local().Format("Mon Jan 2")), m.Utilization, a.openSettings))
+				m.Label, m.Utilization, m.ResetsAt.Local().Format("Mon Jan 2")), m.Utilization, a.onTrayTap))
 		}
 	}
 	if short := e.stats.Tokens.Short(); short != "" {
@@ -1740,7 +1627,7 @@ func (a *app) firstRunAskLoginIfNeeded() {
 	}
 
 	err := zenity.Question(
-		"Open CD-Switcher automatically when you log in?\n\nYou can change this later in Settings.",
+		"Open CD-Switcher automatically when you log in?\n\nYou can change this later on the General tab.",
 		zenity.Title("CD-Switcher setup"),
 		zenity.OKLabel("Open at login"),
 		zenity.CancelLabel("Not now"),
@@ -1794,8 +1681,12 @@ func spinnerResources() []fyne.Resource {
 // the app runs detached from a terminal are diagnosable after the fact.
 var logger *log.Logger
 
+// logPath is the log file, shown on the Settings Logs page.
+var logPath string
+
 func initLog(root string) {
-	f, err := os.OpenFile(filepath.Join(root, "cd-switcher.log"),
+	logPath = filepath.Join(root, "cd-switcher.log")
+	f, err := os.OpenFile(logPath,
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return // logging is best-effort

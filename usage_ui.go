@@ -1,9 +1,11 @@
 package main
 
-// The Usage page: tokens and estimated cost from the Claude Code and Codex
-// session logs on this machine, by hour or day, model and project.
+// The Usage page: tokens and cost from the Claude Code and Codex session logs
+// on this machine, and from Cursor's account usage, by hour or day, model and project.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"math"
@@ -19,6 +21,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/lavluda/cd-switcher/internal/cursorusage"
+	"github.com/lavluda/cd-switcher/internal/opencodeusage"
 	"github.com/lavluda/cd-switcher/internal/sessionlog"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
 )
@@ -26,67 +30,52 @@ import (
 // usageState is the Usage page's data and choices. UI-thread only, except
 // scanning, which guards the background scan.
 type usageState struct {
-	scanner   *sessionlog.Scanner
-	scannedAt time.Time
-	scanning  atomic.Bool
-	rangeIdx  int // 0 today, 1 last 7 days, 2 last 30 days
-	toolIdx   int // 0 all, 1 Claude Code, 2 Codex
-	metric    int // what the chart shows: 0 cost, 1 requests, 2 tokens
-	table     int // 0 by model, 1 by project
+	scanner       *sessionlog.Scanner
+	scannedAt     time.Time
+	scanning      atomic.Bool
+	rangeIdx      int // 0 today, 1 last 7 days, 2 last 30 days
+	toolIdx       int // 0 all, 1 Claude Code, 2 Codex
+	metric        int // what the chart shows: 0 cost, 1 requests, 2 tokens
+	table         int // 0 by model, 1 by project
+	cursorAt      time.Time
+	cursorKnown   bool
+	cursorPercent float64
+	cursorResets  time.Time
+	opencodeAt    time.Time
 }
 
 // codexColor marks Codex in the chart and tables; Claude Code uses the
 // app's accent, so each tool keeps one color everywhere on the page.
 var codexColor = color.NRGBA{R: 0x2B, G: 0x7A, B: 0x8C, A: 0xFF}
 
+// cursorColor marks Cursor in the chart and tables.
+var cursorColor = color.NRGBA{R: 0x6E, G: 0x56, B: 0xCF, A: 0xFF}
+
+// opencodeColor marks OpenCode in the chart and tables.
+var opencodeColor = color.NRGBA{R: 0xC4, G: 0xA3, B: 0x5A, A: 0xFF}
+
 func toolColor(tool string) color.Color {
 	switch tool {
 	case sessionlog.Claude:
-		return uitheme.Accent
+		return homePalette().blue
 	case sessionlog.Codex:
 		return codexColor
+	case sessionlog.Cursor:
+		return cursorColor
+	case sessionlog.OpenCode:
+		return opencodeColor
 	}
 	return uitheme.CurrentMuted()
 }
 
-var usageTools = []string{"", sessionlog.Claude, sessionlog.Codex}
+var usageTools = []string{"", sessionlog.Claude, sessionlog.Codex, sessionlog.Cursor, sessionlog.OpenCode}
 
-// chartIcon is the Usage page's sidebar icon, themed like the stock icons.
-var chartIcon = theme.NewThemedResource(fyne.NewStaticResource("chart.svg", []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 20h16v-2H4zM5 16h3V9H5zm5.5 0h3V4h-3zm5.5 0h3v-5h-3z"/></svg>`)))
+var usageNames = []string{"Claude Code", "Codex", "Cursor", "OpenCode"}
 
-// usageNavItem is the sidebar's Usage entry with today's estimated cost at
-// its right edge. Opening Settings starts a log read when the last one is
-// more than five minutes old, so the figure is there before the page is.
-func (a *app) usageNavItem(b *widget.Button) fyne.CanvasObject {
-	u := &a.usage
-	if u.scanner == nil {
-		u.scanner = sessionlog.NewScanner()
-	}
-	if time.Since(u.scannedAt) > 5*time.Minute {
-		a.scanUsage()
-	}
-	if u.scannedAt.IsZero() {
-		return b
-	}
-	now := time.Now()
-	today := u.scanner.Report(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local), "", true).Total
-	if today.Cost == 0 {
-		return b
-	}
-	cost := canvas.NewText(money(today.Cost), uitheme.CurrentMuted())
-	cost.TextSize = 12
-	// The figure sits over the button; it takes no taps, so they reach it.
-	// The spacer keeps room for it beside the label in a narrow sidebar.
-	room := canvas.NewRectangle(color.Transparent)
-	room.SetMinSize(fyne.NewSize(b.MinSize().Width+cost.MinSize().Width+16, 0))
-	return container.NewStack(room, b, container.NewBorder(nil, nil, nil,
-		container.New(layout.NewCustomPaddedLayout(0, 0, 0, 10), container.NewCenter(cost))))
-}
-
-// redrawSettings rebuilds the open Settings window after a choice on a page.
+// redrawSettings rebuilds the open page after a choice on it.
 func (a *app) redrawSettings() {
-	if a.settingsWin != nil {
-		a.settingsWin.SetContent(a.settingsContent())
+	if a.panelShowing() {
+		a.redrawPanel()
 	}
 }
 
@@ -101,6 +90,8 @@ func (a *app) scanUsage() {
 		if err := u.scanner.Scan(); err != nil {
 			logf("usage scan: %v", err)
 		}
+		a.scanCursor(u)
+		a.scanOpenCode(u)
 		fyne.Do(func() {
 			u.scannedAt = time.Now()
 			a.redrawSettings()
@@ -108,7 +99,69 @@ func (a *app) scanUsage() {
 	}()
 }
 
+// scanCursor fills the Usage page's Cursor rows from the signed-in account.
+// Cursor keeps no local token log. A successful read is reused for five minutes.
+func (a *app) scanCursor(u *usageState) {
+	if !u.cursorAt.IsZero() && time.Since(u.cursorAt) < 5*time.Minute {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	period, perr := cursorusage.Current(ctx)
+	events, err := cursorusage.Events(ctx, time.Now().Add(-sessionlog.Window), time.Now())
+	if perr != nil && !errors.Is(perr, cursorusage.ErrNoLogin) {
+		logf("cursor usage: %v", perr)
+	}
+	if err != nil && !errors.Is(err, cursorusage.ErrNoLogin) {
+		logf("cursor usage history: %v", err)
+	}
+	u.cursorAt = time.Now()
+	if err == nil {
+		rows := make([]sessionlog.External, 0, len(events))
+		for _, e := range events {
+			rows = append(rows, sessionlog.External{
+				At: e.At, Model: e.Model,
+				Usage: sessionlog.Usage{
+					Requests: 1, Input: e.Input, Output: e.Output,
+					CacheRead: e.CacheRead, CacheWrite: e.CacheWrite, Cost: e.Cost,
+				},
+			})
+		}
+		u.scanner.Replace(sessionlog.Cursor, rows)
+	}
+	if perr == nil {
+		u.cursorKnown = true
+		u.cursorPercent = period.Percent
+		u.cursorResets = period.Resets
+	}
+}
+
+// scanOpenCode fills the Usage page from OpenCode's local database.
+func (a *app) scanOpenCode(u *usageState) {
+	if !u.opencodeAt.IsZero() && time.Since(u.opencodeAt) < 5*time.Minute {
+		return
+	}
+	rows, err := opencodeusage.Read(time.Now().Add(-sessionlog.Window))
+	u.opencodeAt = time.Now()
+	if err != nil {
+		logf("opencode usage: %v", err)
+		return
+	}
+	ext := make([]sessionlog.External, 0, len(rows))
+	for _, r := range rows {
+		ext = append(ext, sessionlog.External{
+			At: r.At, Model: r.Model, Project: r.Project,
+			Usage: sessionlog.Usage{
+				Requests: 1, Input: r.Input, Output: r.Output,
+				CacheRead: r.CacheRead, CacheWrite: r.CacheWrite, Cost: r.Cost,
+			},
+		})
+	}
+	u.scanner.Replace(sessionlog.OpenCode, ext)
+}
+
 func (a *app) usageTabContent() fyne.CanvasObject {
+	c := homePalette()
 	u := &a.usage
 	if u.scanner == nil {
 		u.scanner = sessionlog.NewScanner()
@@ -117,23 +170,27 @@ func (a *app) usageTabContent() fyne.CanvasObject {
 		a.scanUsage()
 	}
 
-	refresh := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
-		u.scannedAt = time.Time{}
-		a.scanUsage()
-	})
-	refresh.Importance = widget.LowImportance
 	status := "Reading logs…"
 	if !u.scannedAt.IsZero() {
-		status = "Updated " + u.scannedAt.Format("3:04pm")
+		status = "Updated " + u.scannedAt.Format("3:04 PM")
 	}
-	header := tabHeader("Usage", "Estimated from the session logs Claude Code and Codex keep on this Mac, priced at API list rates.", mutedText(status), refresh)
+	refresh := homeBtn(c, "↻", false, func() {
+		u.scannedAt = time.Time{}
+		u.cursorAt = time.Time{}
+		u.opencodeAt = time.Time{}
+		a.scanUsage()
+	})
+	header := container.NewBorder(nil, nil,
+		vbox(2, homeText("Usage", 20, true, c.label), homeText("Tokens and estimated cost, priced at API list rates", 12, false, c.label2)),
+		container.New(layout.NewCustomPaddedHBoxLayout(8), container.NewCenter(homeText(status, 11.5, false, c.label2)), refresh))
+	note := lowLabel("Claude Code and Codex come from the session logs on this Mac. Cursor comes from the usage its signed-in account reports. OpenCode comes from its local database.")
 
-	ranges := newQuietSegmented([]string{"Today", "7 days", "30 days"}, u.rangeIdx, func(i int) { u.rangeIdx = i; a.redrawSettings() })
-	tools := newQuietSegmented([]string{"All tools", "Claude Code", "Codex"}, u.toolIdx, func(i int) { u.toolIdx = i; a.redrawSettings() })
-	filters := container.NewHBox(ranges, layout.NewSpacer(), tools)
+	ranges := homeSegmented(c, []string{"Today", "7 days", "30 days"}, u.rangeIdx, 12, 11, func(i int) { u.rangeIdx = i; a.redrawSettings() })
+	tools := homeSegmented(c, append([]string{"All tools"}, usageNames...), u.toolIdx, 12, 11, func(i int) { u.toolIdx = i; a.redrawSettings() })
+	filters := container.NewBorder(nil, nil, ranges, tools)
 
 	if u.scannedAt.IsZero() {
-		return scrollTab(header, filters, newPanel(lowLabel("Reading session logs. The first read takes a few seconds.")))
+		return scrollTab(header, filters, homeCard(c, 18, 18, homeText("Reading session logs. The first read takes a few seconds.", 12, false, c.label2)), note)
 	}
 
 	now := time.Now()
@@ -147,7 +204,11 @@ func (a *app) usageTabContent() fyne.CanvasObject {
 	}
 	rep := u.scanner.Report(from, usageTools[u.toolIdx], hourly)
 	if rep.Total.Requests == 0 {
-		return scrollTab(header, filters, newPanel(lowLabel("No Claude Code or Codex sessions in this range.")))
+		msg := "No sessions in this range."
+		if usageTools[u.toolIdx] == sessionlog.Cursor {
+			msg = "Cursor reports included usage as a weekly percent. It does not send an hourly token log for this account, so there is no chart."
+		}
+		return scrollTab(withoutNil(header, filters, a.cursorUsageLine(), homeCard(c, 18, 18, homeText(msg, 12, false, c.label2)), note)...)
 	}
 
 	tot := rep.Total
@@ -164,23 +225,23 @@ func (a *app) usageTabContent() fyne.CanvasObject {
 	}
 	chartTitle := []string{"Cost", "Requests", "Tokens"}[u.metric] + " per " + unit
 	legend := container.NewHBox()
-	for i, name := range []string{"Claude Code", "Codex"} {
+	for i, name := range usageNames {
 		if u.toolIdx == 0 || u.toolIdx == i+1 {
 			legend.Add(legendItem(name, usageTools[i+1]))
 		}
 	}
-	chartHead := container.NewBorder(nil, nil, widget.NewLabelWithStyle(chartTitle, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), legend)
-	overview := newPanel(vbox(4, tiles, divider(), chartHead, chart))
+	chartHead := container.NewBorder(nil, nil, homeText(chartTitle, 13, true, c.label), legend)
+	overview := homeCard(c, 12, 14, vbox(10, tiles, homeRule(c), chartHead, chart))
 
-	tabs := newQuietSegmented([]string{"By model", "By project"}, u.table, func(i int) { u.table = i; a.redrawSettings() })
+	tabs := homeSegmented(c, []string{"By model", "By project"}, u.table, 12, 11, func(i int) { u.table = i; a.redrawSettings() })
 	rows := rep.ByModel
 	first := "Model"
 	if u.table == 1 {
 		rows, first = rep.ByProject, "Project"
 	}
-	table := usageTable(first, rows, tot)
+	table := homeCard(c, 12, 14, vbox(8, container.NewBorder(nil, nil, homeText("Breakdown", 13, true, c.label), tabs), usageTable(first, rows, tot)))
 
-	items := []fyne.CanvasObject{header, filters, overview, container.NewHBox(tabs), table}
+	items := withoutNil(header, filters, a.cursorUsageLine(), overview, table)
 	if len(rep.Unpriced) > 0 {
 		names := make([]string, len(rep.Unpriced))
 		for i, m := range rep.Unpriced {
@@ -188,7 +249,31 @@ func (a *app) usageTabContent() fyne.CanvasObject {
 		}
 		items = append(items, lowLabel("No list price is known for "+strings.Join(names, ", ")+", so their tokens are counted but not priced."))
 	}
-	return scrollTab(items...)
+	return scrollTab(append(items, note)...)
+}
+
+// withoutNil drops the nil entries, so an optional line leaves no gap.
+func withoutNil(objs ...fyne.CanvasObject) []fyne.CanvasObject {
+	out := objs[:0]
+	for _, o := range objs {
+		if o != nil {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// cursorUsageLine is the included-usage percent Cursor reports for this cycle.
+func (a *app) cursorUsageLine() fyne.CanvasObject {
+	u := &a.usage
+	if !u.cursorKnown {
+		return nil
+	}
+	when := "soon"
+	if !u.cursorResets.IsZero() {
+		when = u.cursorResets.Local().Format("Mon 3:04pm")
+	}
+	return lowLabel(fmt.Sprintf("Cursor included usage %.0f%% · resets %s", u.cursorPercent, when))
 }
 
 // statTile is one figure in the strip above the chart; tapping it charts it.
@@ -249,7 +334,7 @@ func usageTable(first string, rows []sessionlog.Row, total sessionlog.Usage) fyn
 			objs = append(objs, divider())
 		}
 	}
-	return newPanel(vbox(0, objs...))
+	return vbox(0, objs...)
 }
 
 // shareBar is a thin bar in the row's tool color, neutral for a row that
@@ -399,57 +484,63 @@ func (t *statTile) Cursor() desktop.Cursor {
 }
 
 func (t *statTile) CreateRenderer() fyne.WidgetRenderer {
-	label := canvas.NewText(t.label, uitheme.CurrentMuted())
-	label.TextSize = 12
-	value := canvas.NewText(t.value, uitheme.CurrentForeground())
-	value.TextSize = 26
-	value.TextStyle = fyne.TextStyle{Bold: true}
-	mark := canvas.NewRectangle(uitheme.CurrentForeground())
-	mark.CornerRadius = 1
-	if !t.selected {
-		mark.Hide()
+	r := &statTileRenderer{t: t,
+		bg:    canvas.NewRectangle(color.Transparent),
+		label: canvas.NewText(t.label, nil),
+		value: canvas.NewText(t.value, nil),
 	}
-	return &statTileRenderer{t: t, label: label, value: value, mark: mark}
+	r.bg.CornerRadius = 12
+	r.label.TextSize = 12
+	r.value.TextSize = 24
+	r.value.TextStyle = fyne.TextStyle{Bold: true}
+	r.Refresh()
+	return r
 }
 
+// statTileRenderer paints a tile; the one being charted sits on a soft fill.
 type statTileRenderer struct {
 	t            *statTile
+	bg           *canvas.Rectangle
 	label, value *canvas.Text
-	mark         *canvas.Rectangle
 }
 
 func (r *statTileRenderer) Layout(size fyne.Size) {
-	r.label.Move(fyne.NewPos(8, 8))
-	r.value.Move(fyne.NewPos(8, 8+r.label.MinSize().Height+2))
-	r.mark.Resize(fyne.NewSize(size.Width-16, 2))
-	r.mark.Move(fyne.NewPos(8, size.Height-3))
+	r.bg.Resize(size)
+	r.label.Move(fyne.NewPos(12, 10))
+	r.value.Move(fyne.NewPos(12, 10+r.label.MinSize().Height+2))
 }
 
 func (r *statTileRenderer) MinSize() fyne.Size {
-	return fyne.NewSize(max(r.label.MinSize().Width, r.value.MinSize().Width)+16, r.label.MinSize().Height+r.value.MinSize().Height+22)
+	return fyne.NewSize(max(r.label.MinSize().Width, r.value.MinSize().Width)+24, r.label.MinSize().Height+r.value.MinSize().Height+24)
 }
 
 func (r *statTileRenderer) Refresh() {
-	r.label.Color, r.value.Color, r.mark.FillColor = uitheme.CurrentMuted(), uitheme.CurrentForeground(), uitheme.CurrentForeground()
+	c := homePalette()
+	r.bg.FillColor, r.label.Color = color.Transparent, c.label2
+	if r.t.selected {
+		r.bg.FillColor, r.label.Color = c.fill2, c.blueText
+		r.label.TextStyle.Bold = true
+	}
+	r.value.Color = c.label
+	r.bg.Refresh()
 	r.label.Refresh()
 	r.value.Refresh()
-	r.mark.Refresh()
 }
 
 func (r *statTileRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.label, r.value, r.mark}
+	return []fyne.CanvasObject{r.bg, r.label, r.value}
 }
 
 func (r *statTileRenderer) Destroy() {}
 
 // ---------- bar chart ----------
 
-// barChart draws one bar per hour or day, stacked by tool, with a light
-// grid, and names the hovered bar's figures in a small card.
+// barChart draws one rounded bar per hour or day, stacked by tool, over a
+// faint grid. Hovering a bar dims the others and names its figures in a small card.
 type barChart struct {
 	widget.BaseWidget
 	labels []string
-	values [][2]float64 // per bucket: Claude Code, Codex
+	values [][]float64 // per bucket, one figure per tool in usageNames
 	tips   []string
 	format func(float64) string
 	hover  int
@@ -477,16 +568,20 @@ func newBarChart(rep sessionlog.Report, metric int) *barChart {
 	}[metric]
 	c := &barChart{format: format, hover: -1}
 	for _, b := range rep.Buckets {
-		cl, cx := pick(b.Tools[sessionlog.Claude]), pick(b.Tools[sessionlog.Codex])
+		seg := make([]float64, len(usageNames))
 		label := b.Start.Format("15:04")
 		when := b.Start.Format("15:04") + "–" + b.Start.Add(time.Hour).Format("15:04")
 		if !rep.Hourly {
 			label = b.Start.Format("Jan 2")
 			when = b.Start.Format("Mon, Jan 2")
 		}
+		tip := when
+		for i, name := range usageNames {
+			seg[i] = pick(b.Tools[usageTools[i+1]])
+			tip += "\n" + name + "  " + format(seg[i])
+		}
 		c.labels = append(c.labels, label)
-		c.values = append(c.values, [2]float64{cl, cx})
-		tip := when + "\nClaude Code  " + format(cl) + "\nCodex  " + format(cx)
+		c.values = append(c.values, seg)
 		c.tips = append(c.tips, tip)
 	}
 	c.ExtendBaseWidget(c)
@@ -508,9 +603,14 @@ func (c *barChart) setHover(i int) {
 
 // plot geometry: room on the left for the axis labels, below for dates.
 const (
-	chartLeft   = 44
+	chartLeft   = 40
 	chartBottom = 22
-	chartTop    = 8
+	chartTop    = 10
+	// barGap separates the stacked tool segments; barRadius rounds each one.
+	barGap    = 2
+	barRadius = 5
+	// dimmed is the opacity of the bars that are not hovered.
+	dimmed = 0.3
 )
 
 func (c *barChart) bucketAt(x float32) int {
@@ -542,23 +642,28 @@ func niceMax(v float64) float64 {
 
 func (c *barChart) CreateRenderer() fyne.WidgetRenderer {
 	r := &barChartRenderer{c: c}
+	nSeg := len(usageNames)
 	peak := 0.0
 	for _, v := range c.values {
-		peak = max(peak, v[0]+v[1])
+		sum := 0.0
+		for _, x := range v {
+			sum += x
+		}
+		peak = max(peak, sum)
 	}
 	r.top = niceMax(peak)
 	for i := 0; i < 3; i++ {
-		line := canvas.NewRectangle(uitheme.CurrentGridLine())
+		// The baseline stays solid; the levels above it are fainter.
+		line := canvas.NewRectangle(fadeColor(uitheme.CurrentGridLine(), []float32{1, 0.6, 0.6}[i]))
 		r.grid = append(r.grid, line)
-		r.axis = append(r.axis, newChartText(c.format(r.top*float64(i)/2), fyne.TextAlignTrailing))
+		label := newChartText(c.format(r.top*float64(i)/2), fyne.TextAlignTrailing)
+		label.Hidden = i == 0 // the baseline is zero; the label only adds noise
+		r.axis = append(r.axis, label)
 	}
-	r.hoverBg = canvas.NewRectangle(fadeColor(uitheme.CurrentForeground(), 0.05))
-	r.hoverBg.CornerRadius = 4
 	for i, v := range c.values {
-		for s := 0; s < 2; s++ {
+		for s := 0; s < nSeg; s++ {
 			bar := canvas.NewRectangle(toolColor(usageTools[s+1]))
-			bar.CornerRadius = 2
-			if v[s] == 0 {
+			if s >= len(v) || v[s] == 0 {
 				bar.Hide()
 			}
 			r.bars = append(r.bars, bar)
@@ -566,15 +671,18 @@ func (c *barChart) CreateRenderer() fyne.WidgetRenderer {
 		r.xlabels = append(r.xlabels, newChartText(c.labels[i], fyne.TextAlignCenter))
 	}
 	r.tipBg = canvas.NewRectangle(theme.Color(theme.ColorNameOverlayBackground))
-	r.tipBg.CornerRadius = 6
+	r.tipBg.CornerRadius = 8
 	r.tipBg.StrokeColor = theme.Color(theme.ColorNameSeparator)
 	r.tipBg.StrokeWidth = 1
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 1+nSeg; i++ {
 		t := canvas.NewText("", uitheme.CurrentForeground())
 		t.TextSize = 12
 		r.tipText = append(r.tipText, t)
 	}
 	r.tipText[0].TextStyle = fyne.TextStyle{Bold: true}
+	for s := 0; s < nSeg; s++ {
+		r.tipDots = append(r.tipDots, canvas.NewCircle(toolColor(usageTools[s+1])))
+	}
 	return r
 }
 
@@ -585,9 +693,9 @@ type barChartRenderer struct {
 	axis    []*canvas.Text
 	bars    []*canvas.Rectangle
 	xlabels []*canvas.Text
-	hoverBg *canvas.Rectangle
 	tipBg   *canvas.Rectangle
 	tipText []*canvas.Text
+	tipDots []*canvas.Circle // colour keys for the tool lines of the card
 }
 
 func (r *barChartRenderer) Layout(size fyne.Size) {
@@ -605,21 +713,34 @@ func (r *barChartRenderer) Layout(size fyne.Size) {
 		return
 	}
 	slot := plotW / float32(n)
-	barW := max(min(slot*0.62, 28), 2)
+	barW := max(min(slot*0.7, 34), 2)
 	// Label every k-th bar so labels never overlap.
 	every := int(math.Ceil(float64(52 / slot)))
+	nSeg := len(usageNames)
 	for i, v := range r.c.values {
 		x := chartLeft + slot*float32(i) + (slot-barW)/2
 		base := chartTop + plotH
-		for s := 0; s < 2; s++ {
-			h := float32(v[s]/r.top) * plotH
-			if v[s] > 0 && h < 2 {
+		for s := 0; s < nSeg; s++ {
+			val := 0.0
+			if s < len(v) {
+				val = v[s]
+			}
+			h := float32(val/r.top) * plotH
+			if val > 0 && h < 2 {
 				h = 2
 			}
-			bar := r.bars[i*2+s]
+			bar := r.bars[i*nSeg+s]
+			bar.CornerRadius = min(barRadius, barW/2, h/2)
+			bar.FillColor = toolColor(usageTools[s+1])
+			if r.c.hover >= 0 && r.c.hover != i {
+				bar.FillColor = fadeColor(bar.FillColor, dimmed)
+			}
 			bar.Resize(fyne.NewSize(barW, h))
 			bar.Move(fyne.NewPos(x, base-h))
 			base -= h
+			if h > 0 {
+				base -= barGap // keeps the next segment clear of this one
+			}
 		}
 		lbl := r.xlabels[i]
 		lbl.Hidden = i%every != 0
@@ -632,20 +753,27 @@ func (r *barChartRenderer) Layout(size fyne.Size) {
 func (r *barChartRenderer) layoutHover(size fyne.Size, slot, plotH float32) {
 	i := r.c.hover
 	show := i >= 0 && i < len(r.c.tips)
-	r.hoverBg.Hidden, r.tipBg.Hidden = !show, !show
+	r.tipBg.Hidden = !show
 	for _, t := range r.tipText {
 		t.Hidden = !show
+	}
+	for _, d := range r.tipDots {
+		d.Hidden = !show
 	}
 	if !show {
 		return
 	}
-	r.hoverBg.Resize(fyne.NewSize(slot, plotH+chartTop))
-	r.hoverBg.Move(fyne.NewPos(chartLeft+slot*float32(i), 0))
 	lines := strings.Split(r.c.tips[i], "\n")
 	w := float32(0)
 	for j, t := range r.tipText {
-		t.Text = lines[j]
-		w = max(w, t.MinSize().Width)
+		if j < len(lines) {
+			t.Text = lines[j]
+		}
+		indent := float32(0)
+		if j > 0 {
+			indent = tipDotIndent
+		}
+		w = max(w, t.MinSize().Width+indent)
 	}
 	w += 20
 	h := float32(len(r.tipText))*17 + 12
@@ -656,9 +784,19 @@ func (r *barChartRenderer) layoutHover(size fyne.Size, slot, plotH float32) {
 	r.tipBg.Resize(fyne.NewSize(w, h))
 	r.tipBg.Move(fyne.NewPos(x, chartTop))
 	for j, t := range r.tipText {
-		t.Move(fyne.NewPos(x+10, chartTop+6+float32(j)*17))
+		indent := float32(0)
+		if j > 0 {
+			indent = tipDotIndent
+			d := r.tipDots[j-1]
+			d.Resize(fyne.NewSize(8, 8))
+			d.Move(fyne.NewPos(x+10, chartTop+6+float32(j)*17+5))
+		}
+		t.Move(fyne.NewPos(x+10+indent, chartTop+6+float32(j)*17))
 	}
 }
+
+// tipDotIndent leaves room for the colour dot before a tool's line in the card.
+const tipDotIndent = 14
 
 func (r *barChartRenderer) MinSize() fyne.Size { return r.c.MinSize() }
 
@@ -670,7 +808,7 @@ func (r *barChartRenderer) Refresh() {
 }
 
 func (r *barChartRenderer) Objects() []fyne.CanvasObject {
-	objs := []fyne.CanvasObject{r.hoverBg}
+	var objs []fyne.CanvasObject
 	for _, g := range r.grid {
 		objs = append(objs, g)
 	}
@@ -684,6 +822,9 @@ func (r *barChartRenderer) Objects() []fyne.CanvasObject {
 		objs = append(objs, t)
 	}
 	objs = append(objs, r.tipBg)
+	for _, d := range r.tipDots {
+		objs = append(objs, d)
+	}
 	for _, t := range r.tipText {
 		objs = append(objs, t)
 	}
@@ -691,3 +832,12 @@ func (r *barChartRenderer) Objects() []fyne.CanvasObject {
 }
 
 func (r *barChartRenderer) Destroy() {}
+
+func newChartText(text string, align fyne.TextAlign) *canvas.Text {
+	t := canvas.NewText(text, uitheme.CurrentMuted())
+	t.TextSize = chartLabelSz
+	t.Alignment = align
+	return t
+}
+
+const chartLabelSz = 10

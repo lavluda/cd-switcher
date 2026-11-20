@@ -49,11 +49,10 @@ func TestSettingsTabsAndFormsBuild(t *testing.T) {
 	a.copilot = copilotEntry{quota: copilot.Quota{Login: "me", Plan: "pro", Percent: 24, Remaining: 228, Total: 300}, fetchedAt: time.Now()}
 
 	w := test.NewWindow(nil)
-	a.settingsWin = w
-	w.Resize(fyne.NewSize(900, 700))
-	for i, pg := range settingsPages() {
-		a.settingsTabIndex = i
-		w.SetContent(a.settingsContent())
+	a.panelWin = w // forms open over the panel
+	w.Resize(fyne.NewSize(panelW, panelH))
+	for _, pg := range settingsPages() {
+		w.SetContent(pg.build(a))
 		if pg.build(a).MinSize().Height <= 0 {
 			t.Fatalf("page %q rendered empty", pg.title)
 		}
@@ -69,4 +68,17 @@ func TestSettingsTabsAndFormsBuild(t *testing.T) {
 	a.mcpForm(mcp.Server{}, "")
 	a.instructionsForm(instructions.Entry{})
 	a.mcpPasteForm()
+	if a.panelContent().MinSize().Height <= 0 {
+		t.Fatal("menu bar panel rendered empty")
+	}
+	// Every panel tab builds under the toolbar.
+	for _, pg := range settingsPages() {
+		panelTab = pg.title
+		if a.panelContent().MinSize().Height <= 0 {
+			t.Fatalf("panel tab %q rendered empty", pg.title)
+		}
+	}
+	panelTab = ""
+	pw := test.NewWindow(a.panelContent())
+	pw.Resize(fyne.NewSize(panelW, panelH))
 }

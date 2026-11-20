@@ -946,7 +946,7 @@ func (a *app) doImport() error {
 			}
 		}
 	}
-	_ = zenity.Notify(fmt.Sprintf("Imported %d providers and %d MCP servers. Add the providers' API keys in Settings.", added, len(servers)))
+	_ = zenity.Notify(fmt.Sprintf("Imported %d providers and %d MCP servers. Add the providers' API keys on the Providers tab.", added, len(servers)))
 	return joinErrs(errs)
 }
 

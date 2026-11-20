@@ -3,9 +3,8 @@
 // both light and dark variants. Only colors are overridden — fonts, icons,
 // and sizes stay stock Fyne (no bundled font assets).
 //
-// This only affects Fyne-rendered surfaces (the Settings window). The system
-// tray menu is OS-native chrome and zenity dialogs are native OS dialogs —
-// neither picks up this theme.
+// This colors Fyne surfaces: the Settings window and the menu-bar panel.
+// Zenity dialogs stay native OS chrome and do not pick up this theme.
 package uitheme
 
 import (
@@ -48,6 +47,9 @@ var (
 func isDark() bool {
 	return fyne.CurrentApp().Settings().ThemeVariant() == theme.VariantDark
 }
+
+// Dark reports whether the app's current theme variant is dark.
+func Dark() bool { return isDark() }
 
 // CurrentGridLine returns the gridline color matching the app's current
 // light/dark setting, for hand-drawn canvas elements (e.g. the usage chart)
@@ -162,6 +164,10 @@ func (t claudeTheme) Size(name fyne.ThemeSizeName) float32 {
 		return 6
 	case theme.SizeNameInnerPadding:
 		return 12
+	case theme.SizeNameInputRadius:
+		return 8
+	case theme.SizeNameSelectionRadius:
+		return 6
 	case theme.SizeNameText:
 		return 13
 	case theme.SizeNameHeadingText:

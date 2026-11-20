@@ -80,6 +80,40 @@ func sooner(a, b AccountLoad) bool {
 	return a.score() < b.score()
 }
 
+// Rolled returns s with every window whose reset time has passed counted as
+// reset: 0% and the next reset one period later. A reading kept through failed
+// fetches would otherwise show last period's numbers as current.
+func (s Stats) Rolled(now time.Time) Stats {
+	roll := func(w *Window, period time.Duration) {
+		if w.ResetsAt.IsZero() || w.ResetsAt.After(now) {
+			return
+		}
+		*w = Window{ResetsAt: w.ResetsAt}
+		for !w.ResetsAt.After(now) {
+			w.ResetsAt = w.ResetsAt.Add(period)
+		}
+	}
+	const week = 7 * 24 * time.Hour
+	roll(&s.FiveHour, 5*time.Hour)
+	for _, w := range []*Window{&s.SevenDay, &s.SevenDaySonnet, &s.SevenDayOpus, &s.SevenDayFable,
+		&s.SevenDayCowork, &s.SevenDayOAuthApps, &s.SevenDayOmelette, &s.OmelettePromotional} {
+		roll(w, week)
+	}
+	limits := make([]Limit, len(s.Limits))
+	for i, l := range s.Limits {
+		w := Window{Utilization: l.Percent, ResetsAt: l.ResetsAt}
+		if l.Kind == "five_hour" {
+			roll(&w, 5*time.Hour)
+		} else {
+			roll(&w, week)
+		}
+		l.Percent, l.ResetsAt = w.Utilization, w.ResetsAt
+		limits[i] = l
+	}
+	s.Limits = limits
+	return s
+}
+
 // WithWindows returns s with the session and weekly windows replaced, for a
 // reading that came from somewhere other than the usage API (Claude Code's
 // statusline). A window that is not present keeps its old value.

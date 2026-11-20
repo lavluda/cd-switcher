@@ -2,10 +2,11 @@
 // tray can show which ones are working, which wait for the user and which have
 // finished.
 //
-// Claude Code and Codex share one hooks schema: CD-Switcher adds itself as a
-// command hook for a few events in each. Every event runs this binary with
-// Arg, which records the session's state in a small file under the state
-// directory; the app reads those files. Nothing is sent anywhere.
+// Claude Code and Codex share one hooks schema, and Cursor has its own.
+// OpenCode has no command hooks, so it gets a small plugin that runs the same
+// binary. Every event runs this binary with Arg, which records the session's
+// state in a small file under the state directory; the app reads those files.
+// Nothing is sent anywhere.
 package agents
 
 import (
@@ -15,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -72,12 +74,16 @@ func safe(s string) string {
 }
 
 type event struct {
-	Name      string `json:"hook_event_name"`
-	SessionID string `json:"session_id"`
-	Cwd       string `json:"cwd"`
-	Type      string `json:"notification_type"`
-	Message   string `json:"message"`
-	Last      string `json:"last_assistant_message"`
+	Name           string   `json:"hook_event_name"`
+	SessionID      string   `json:"session_id"`
+	ConversationID string   `json:"conversation_id"` // Cursor's name for the session
+	Cwd            string   `json:"cwd"`
+	Roots          []string `json:"workspace_roots"` // Cursor, when cwd is absent
+	Type           string   `json:"notification_type"`
+	Message        string   `json:"message"`
+	Last           string   `json:"last_assistant_message"`
+	Text           string   `json:"text"`   // Cursor afterAgentResponse
+	Status         string   `json:"status"` // Cursor stop: completed, aborted, error
 }
 
 // RunHook records one hook event. It prints nothing and never fails: output
@@ -85,13 +91,36 @@ type event struct {
 func RunHook(stateDir, tool string, in io.Reader) {
 	b, _ := io.ReadAll(io.LimitReader(in, 4<<20))
 	var ev event
-	if json.Unmarshal(b, &ev) != nil || ev.SessionID == "" {
+	if json.Unmarshal(b, &ev) != nil || ev.id() == "" {
 		return
 	}
 	apply(stateDir, tool, ev, os.Getenv("__CFBundleIdentifier"), time.Now())
 }
 
+// id is the session. Cursor sends conversation_id; Claude Code and Codex
+// send session_id.
+func (ev event) id() string {
+	if ev.SessionID != "" {
+		return ev.SessionID
+	}
+	return ev.ConversationID
+}
+
+// cursorApp is Cursor's macOS bundle id, so a click can bring it forward.
+// Cursor does not set __CFBundleIdentifier on the hook process.
+const cursorApp = "com.todesktop.230313mzl4w4u92"
+
 func apply(stateDir, tool string, ev event, app string, now time.Time) {
+	ev.Name = canonical(ev)
+	if ev.SessionID == "" {
+		ev.SessionID = ev.ConversationID
+	}
+	if ev.Cwd == "" && len(ev.Roots) > 0 {
+		ev.Cwd = ev.Roots[0]
+	}
+	if app == "" && tool == harness.Cursor && runtime.GOOS == "darwin" {
+		app = cursorApp
+	}
 	p := path(stateDir, tool, ev.SessionID)
 	var next State
 	msg := ""
@@ -101,6 +130,8 @@ func apply(stateDir, tool string, ev event, app string, now time.Time) {
 		return
 	case "UserPromptSubmit", "PostToolUse":
 		next = Running
+	case "AfterAgentResponse":
+		next, msg = Running, ev.Text
 	case "PermissionRequest":
 		next, msg = Waiting, "Needs your permission"
 	case "Notification":
@@ -122,11 +153,17 @@ func apply(stateDir, tool string, ev event, app string, now time.Time) {
 	if old, err := os.ReadFile(p); err == nil {
 		_ = json.Unmarshal(old, &s)
 		// PostToolUse fires on every tool call; skip the write when nothing changes.
-		if s.State == next && next == Running {
+		// afterAgentResponse also reports Running, and its text has to be kept.
+		if s.State == next && next == Running && msg == "" {
 			return
 		}
 	}
-	s.State, s.Message, s.At = next, oneLine(msg), now
+	line := oneLine(msg)
+	// Cursor's stop event carries no text; the reply arrived in afterAgentResponse.
+	if line == "" && next == Done {
+		line = s.Message
+	}
+	s.State, s.Message, s.At = next, line, now
 	if ev.Cwd != "" {
 		s.Cwd = ev.Cwd
 	}
@@ -138,6 +175,28 @@ func apply(stateDir, tool string, ev event, app string, now time.Time) {
 		return
 	}
 	_ = writeAtomic(p, out)
+}
+
+// canonical renames Cursor's hook events to the names Claude Code uses.
+// A Cursor stop with status "error" is the same as Claude Code's StopFailure.
+func canonical(ev event) string {
+	switch ev.Name {
+	case "beforeSubmitPrompt":
+		return "UserPromptSubmit"
+	case "postToolUse":
+		return "PostToolUse"
+	case "afterAgentResponse":
+		return "AfterAgentResponse"
+	case "stop":
+		if ev.Status == "error" {
+			return "StopFailure"
+		}
+		return "Stop"
+	case "sessionEnd":
+		return "SessionEnd"
+	default:
+		return ev.Name
+	}
 }
 
 // oneLine shortens an agent's message to a menu-sized line.

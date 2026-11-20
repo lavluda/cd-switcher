@@ -14,3 +14,9 @@
 # Internal roadmap / planning notes (kept local, not published)
 /docs/settings-and-stats-plan.md
 /docs/harness-hub-plan.md
+/docs/roadmap-research.md
+
+# Stray local builds and tool state
+/cd-switcher
+/.tmp/
+/.omc/

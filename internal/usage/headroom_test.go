@@ -69,3 +69,25 @@ func TestAccountFromCacheKey(t *testing.T) {
 		t.Fatal("parsed a key without UUIDs")
 	}
 }
+
+func TestRolledResetsExpiredWindows(t *testing.T) {
+	now := time.Date(2026, 11, 6, 11, 50, 0, 0, time.UTC)
+	past := time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+	s := Stats{
+		FiveHour:      Window{Utilization: 40, ResetsAt: future},
+		SevenDay:      Window{Utilization: 100, ResetsAt: past},
+		SevenDayFable: Window{Utilization: 33, ResetsAt: past},
+		Limits:        []Limit{{Kind: "weekly_scoped", Percent: 50, ResetsAt: past}},
+	}.Rolled(now)
+	if s.FiveHour.Utilization != 40 || !s.FiveHour.ResetsAt.Equal(future) {
+		t.Errorf("live window changed: %+v", s.FiveHour)
+	}
+	next := past.Add(7 * 24 * time.Hour)
+	if s.SevenDayFable.Utilization != 0 || !s.SevenDayFable.ResetsAt.Equal(next) {
+		t.Errorf("fable = %+v, want 0%% resetting %v", s.SevenDayFable, next)
+	}
+	if s.SevenDay.Utilization != 0 || s.Limits[0].Percent != 0 || !s.Limits[0].ResetsAt.Equal(next) {
+		t.Errorf("weekly not rolled: %+v %+v", s.SevenDay, s.Limits[0])
+	}
+}

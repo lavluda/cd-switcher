@@ -5,21 +5,19 @@ package main
 // goes into a dialog, not into a field on the tab itself.
 
 import (
-	"errors"
 	"fmt"
+	"image/color"
 	"sort"
 	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/lavluda/cd-switcher/internal/cctoggles"
-	"github.com/lavluda/cd-switcher/internal/copilot"
 	"github.com/lavluda/cd-switcher/internal/envcheck"
 	"github.com/lavluda/cd-switcher/internal/harness"
 	"github.com/lavluda/cd-switcher/internal/instructions"
@@ -27,44 +25,8 @@ import (
 	"github.com/lavluda/cd-switcher/internal/profile"
 	"github.com/lavluda/cd-switcher/internal/provider"
 	"github.com/lavluda/cd-switcher/internal/skills"
-	"github.com/lavluda/cd-switcher/internal/terminal"
 	"github.com/lavluda/cd-switcher/internal/uitheme"
-	"github.com/lavluda/cd-switcher/internal/usage"
 )
-
-func tabHeader(title, subtitle string, actions ...fyne.CanvasObject) fyne.CanvasObject {
-	sub := widget.NewLabel(subtitle)
-	sub.Importance = widget.LowImportance
-	sub.Wrapping = fyne.TextWrapWord
-	// Inset by the label padding so the title lines up with the subtitle.
-	head := fyne.CanvasObject(container.New(layout.NewCustomPaddedLayout(0, 0, theme.InnerPadding(), 0), headingText(title)))
-	if len(actions) > 0 {
-		// Buttons sit beside the title, centred, so they keep their own
-		// height and the subtitle below gets the full width.
-		head = container.NewBorder(nil, nil, nil, container.NewCenter(container.NewHBox(actions...)), head)
-	}
-	return vbox(2, head, sub)
-}
-
-// titleSub is a list row's text: a bold title over a muted detail line,
-// set tight, without the padding two stacked labels would add.
-func titleSub(title, detail string) fyne.CanvasObject {
-	t := canvas.NewText(title, uitheme.CurrentForeground())
-	t.TextStyle = fyne.TextStyle{Bold: true}
-	t.TextSize = 14
-	if detail == "" {
-		return container.New(layout.NewCustomPaddedLayout(6, 6, theme.InnerPadding(), 0), t)
-	}
-	d := canvas.NewText(detail, uitheme.CurrentMuted())
-	d.TextSize = 12
-	return container.New(layout.NewCustomPaddedLayout(6, 6, theme.InnerPadding(), 0), vbox(3, t, d))
-}
-
-// actionRow is a list row: text on the left, buttons on the right kept at
-// their own height instead of stretched to the row's.
-func actionRow(left fyne.CanvasObject, right ...fyne.CanvasObject) fyne.CanvasObject {
-	return container.NewBorder(nil, nil, nil, container.NewCenter(container.NewHBox(right...)), left)
-}
 
 // mutedText is a one-line, non-wrapping low-importance label for use inside
 // an HBox, where a wrapping label gets no width and breaks every character.
@@ -81,155 +43,111 @@ func lowLabel(text string) *widget.Label {
 	return l
 }
 
-func iconButton(icon fyne.Resource, tapped func()) *widget.Button {
-	b := widget.NewButtonWithIcon("", icon, tapped)
-	b.Importance = widget.LowImportance
-	return b
-}
-
 func scrollTab(items ...fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewVScroll(container.NewPadded(vbox(10, items...)))
 }
 
-// showDialog opens d over the Settings window.
+// showForm opens a sheet over the panel: a title, the fields in a
+// scrolling body, and Cancel and the confirm button pinned right under a
+// hairline, so a long form never hides behind its own buttons.
 func (a *app) showForm(title, confirm string, items []*widget.FormItem, size fyne.Size, done func()) {
-	if a.settingsWin == nil {
+	win := a.panelWin
+	if win == nil {
 		return
 	}
 	// Labels sit above their fields, so long field names never squeeze the
-	// inputs and every field gets the dialog's full width.
+	// inputs and every field gets the sheet's full width.
 	var fields []fyne.CanvasObject
 	for _, it := range items {
 		var parts []fyne.CanvasObject
 		if it.Text != "" {
-			l := canvas.NewText(it.Text, uitheme.CurrentForeground())
-			l.TextSize = 13
-			l.TextStyle = fyne.TextStyle{Bold: true}
+			l := canvas.NewText(it.Text, uitheme.CurrentMuted())
+			l.TextSize = 12
 			parts = append(parts, container.New(layout.NewCustomPaddedLayout(0, 0, 2, 0), l))
 		}
-		parts = append(parts, it.Widget)
+		field := it.Widget
+		if _, ok := field.(*widget.Select); ok {
+			// A Select has no outline of its own, unlike the entries beside it.
+			box := canvas.NewRectangle(color.Transparent)
+			box.CornerRadius, box.StrokeWidth, box.StrokeColor = 8, 1, theme.Color(theme.ColorNameInputBorder)
+			field = container.NewStack(box, field)
+		}
+		parts = append(parts, field)
 		if it.HintText != "" {
 			parts = append(parts, lowLabel(it.HintText))
 		}
 		fields = append(fields, vbox(4, parts...))
 	}
-	body := container.New(layout.NewCustomPaddedLayout(4, 8, 4, 4), vbox(14, fields...))
-	d := dialog.NewCustomConfirm(title, confirm, "Cancel", container.NewVScroll(body), func(ok bool) {
-		if ok {
-			done()
-		}
-	}, a.settingsWin)
+	body := container.New(layout.NewCustomPaddedLayout(2, 14, 24, 24), vbox(14, fields...))
+
+	heading := canvas.NewText(title, uitheme.CurrentForeground())
+	heading.TextSize = 18
+	heading.TextStyle = fyne.TextStyle{Bold: true}
+	head := container.New(layout.NewCustomPaddedLayout(22, 10, 24, 24), heading)
+
+	var overlay fyne.CanvasObject
+	canvasOf := win.Canvas()
+	prevKey := canvasOf.OnTypedKey()
+	closeSheet := func() {
+		canvasOf.SetOnTypedKey(prevKey)
+		canvasOf.Overlays().Remove(overlay)
+	}
+	cancel := widget.NewButton("Cancel", closeSheet)
+	save := widget.NewButton(confirm, func() {
+		closeSheet()
+		done()
+	})
+	save.Importance = widget.HighImportance
+	foot := container.New(layout.NewCustomPaddedLayout(12, 14, 24, 24), container.NewHBox(layout.NewSpacer(), cancel, save))
+
+	surface := canvas.NewRectangle(theme.Color(theme.ColorNameOverlayBackground))
+	surface.CornerRadius = 14
+	surface.StrokeWidth = 1
+	surface.StrokeColor = theme.Color(theme.ColorNameSeparator)
+	sheet := container.NewStack(surface, container.NewBorder(head, container.NewVBox(widget.NewSeparator(), foot), nil, nil, container.NewVScroll(body)))
+
+	if size.Width == 0 {
+		size.Width = 520
+	}
 	if size.Height == 0 {
-		// Tall enough for every field, scrolling only when the window is not.
-		size.Height = min(body.MinSize().Height+170, a.settingsWin.Canvas().Size().Height-60)
+		// Tall enough for every field; the layout shrinks it to fit the window, and the body scrolls.
+		size.Height = body.MinSize().Height + head.MinSize().Height + foot.MinSize().Height + 24
 	}
-	d.Resize(size)
-	d.Show()
+	// A scrim and a card on it, not a PopUp: a PopUp draws a square backdrop
+	// that shows behind the card's rounded corners.
+	scrim := canvas.NewRectangle(color.NRGBA{A: 0x66})
+	overlay = container.New(&sheetLayout{size}, scrim, sheet)
+	canvasOf.SetOnTypedKey(func(e *fyne.KeyEvent) {
+		if e.Name == fyne.KeyEscape {
+			closeSheet()
+			return
+		}
+		if prevKey != nil {
+			prevKey(e)
+		}
+	})
+	overlay.Resize(canvasOf.Size()) // the canvas sizes a PopUp for you, but not a plain overlay
+	canvasOf.Overlays().Add(overlay)
 }
 
-// ---------- Codex & Copilot ----------
+// sheetLayout stretches a scrim over the window and centres a card on it,
+// kept 20px from the sides and 24px from the top and bottom.
+type sheetLayout struct{ size fyne.Size }
 
-func (a *app) codexTabContent() fyne.CanvasObject {
-	a.mu.Lock()
-	accts := append([]profile.CodexAccount(nil), a.cfg.CodexAccounts...)
-	active := a.cfg.ActiveCodex
-	a.mu.Unlock()
-
-	addCurrent := widget.NewButtonWithIcon("Save current login", theme.DownloadIcon(), func() { a.runOp(a.doCodexAddCurrent) })
-	signIn := widget.NewButtonWithIcon("Sign in…", theme.LoginIcon(), a.startCodexLogin)
-	signIn.Importance = widget.HighImportance
-	items := []fyne.CanvasObject{tabHeader("Codex & Copilot", "Each Codex account keeps its own ChatGPT login. Switching swaps Codex's auth.json; running codex sessions need a restart.", addCurrent, signIn)}
-
-	if !harness.Installed(harness.Codex, "") {
-		items = append(items, newPanel(lowLabel("Codex is not installed on this Mac (no "+harness.CodexHome()+" folder).")))
-	} else if len(accts) == 0 {
-		items = append(items, newPanel(lowLabel("No Codex accounts yet. Save current login keeps the account Codex uses now; Sign in adds another one through your browser.")))
-	}
-	for _, x := range accts {
-		items = append(items, a.codexCard(x, x.ID == active))
-	}
-
-	a.statsMu.Lock()
-	cp := a.copilot
-	a.statsMu.Unlock()
-	if !cp.fetchedAt.IsZero() {
-		q := cp.quota
-		title := widget.NewLabelWithStyle("GitHub Copilot", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		meta := lowLabel(strings.TrimSpace(q.Login + " · " + q.Plan))
-		var meter fyne.CanvasObject = lowLabel("Unlimited premium requests")
-		if !q.Unlimited {
-			meter = usageMeter(usage.Meter{Label: fmt.Sprintf("Premium requests · %d of %d left", q.Remaining, q.Total), Window: usage.Window{Utilization: q.Percent, ResetsAt: q.ResetsAt}})
-		}
-		items = append(items, newPanel(vbox(6, title, meta, meter)))
-	} else if cp.err != nil && !errors.Is(cp.err, copilot.ErrNoLogin) {
-		items = append(items, newPanel(lowLabel("GitHub Copilot: "+cp.err.Error())))
-	}
-	return scrollTab(items...)
+func (l *sheetLayout) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	objs[0].Resize(size)
+	objs[0].Move(fyne.NewPos(0, 0))
+	card := fyne.NewSize(min(l.size.Width, size.Width-40), min(l.size.Height, size.Height-48))
+	objs[1].Resize(card)
+	objs[1].Move(fyne.NewPos((size.Width-card.Width)/2, (size.Height-card.Height)/2))
 }
 
-func (a *app) codexCard(x profile.CodexAccount, active bool) fyne.CanvasObject {
-	name := widget.NewLabelWithStyle(x.Label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	meta := container.NewHBox()
-	if active {
-		meta.Add(badge("Active"))
-	}
-	var info []string
-	if !strings.EqualFold(x.Email, x.Label) {
-		info = append(info, x.Email)
-	}
-	if x.Plan != "" {
-		info = append(info, x.Plan)
-	}
-	if len(info) > 0 {
-		meta.Add(mutedText(strings.Join(info, " · ")))
-	}
-	body := []fyne.CanvasObject{name}
-	if len(meta.Objects) > 0 {
-		body = append(body, meta)
-	}
-
-	a.statsMu.Lock()
-	e, ok := a.codexCache[x.ID]
-	a.statsMu.Unlock()
-	switch {
-	case ok && !e.fetchedAt.IsZero():
-		var cells []fyne.CanvasObject
-		if e.quota.Session.Seconds > 0 {
-			cells = append(cells, usageMeter(usage.Meter{Label: "Session", Window: usage.Window{Utilization: e.quota.Session.Percent, ResetsAt: e.quota.Session.ResetsAt}}))
-		}
-		if e.quota.Weekly.Seconds > 0 {
-			cells = append(cells, usageMeter(usage.Meter{Label: "This week", Window: usage.Window{Utilization: e.quota.Weekly.Percent, ResetsAt: e.quota.Weekly.ResetsAt}}))
-		}
-		if len(cells) > 0 {
-			body = append(body, container.NewGridWithColumns(2, cells...))
-		}
-		if e.err != nil {
-			body = append(body, lowLabel("Last reading "+e.fetchedAt.Local().Format("3:04pm")+" · "+e.err.Error()))
-		}
-	case ok && e.err != nil:
-		body = append(body, lowLabel(e.err.Error()))
-	default:
-		body = append(body, lowLabel("Usage will appear after the next refresh."))
-	}
-
-	id := x.ID
-	actions := container.NewHBox(
-		iconButton(theme.DocumentCreateIcon(), func() { a.runOp(func() error { return a.doCodexRename(id) }) }),
-		iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doCodexRemove(id) }) }),
-	)
-	var use fyne.CanvasObject
-	if !active {
-		b := widget.NewButton("Use", func() { a.runOp(func() error { return a.doCodexSwitch(id) }) })
-		b.Importance = widget.HighImportance
-		use = b
-	}
-	body = append(body, container.NewBorder(nil, nil, actions, use))
-	return newPanel(vbox(6, body...))
-}
+func (l *sheetLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.Size{} }
 
 // ---------- providers ----------
 
 func (a *app) providersTabContent() fyne.CanvasObject {
+	c := homePalette()
 	a.mu.Lock()
 	providers := append([]provider.Provider(nil), a.cfg.Providers...)
 	active := map[string]string{}
@@ -238,50 +156,57 @@ func (a *app) providersTabContent() fyne.CanvasObject {
 	}
 	a.mu.Unlock()
 
-	items := []fyne.CanvasObject{tabHeader("Providers", "Point Claude Code or Codex at another model API. Only the endpoint, key and model settings change; everything else in their config stays as it is.")}
-
+	var blocks []fyne.CanvasObject
 	if found := envcheck.Scan(); len(found) > 0 {
-		rows := []fyne.CanvasObject{lowLabel("These variables override what is set here in every terminal that loads them:")}
+		var rows []fyne.CanvasObject
 		for _, f := range found {
 			f := f
-			row := fyne.CanvasObject(widget.NewLabel(f.String()))
-			if f.File != "" && f.Line > 0 {
-				row = actionRow(row, widget.NewButton("Comment out", func() {
-					a.runOp(func() error { return a.doDisableEnv(f) })
-				}))
+			where := "Set in the running environment"
+			if f.File != "" {
+				where = f.File
+				if f.Line > 0 {
+					where = fmt.Sprintf("%s, line %d", f.File, f.Line)
+				}
 			}
-			rows = append(rows, row)
+			var fix []fyne.CanvasObject
+			if f.File != "" && f.Line > 0 {
+				fix = append(fix, homeLink(c, "Comment out", func() { a.runOp(func() error { return a.doDisableEnv(f) }) }))
+			}
+			rows = append(rows, prefItem(c, f.Name, "", clip(where, 64), fix...))
 		}
-		items = append(items, sectionCaption("Environment conflicts"), group(rows...))
+		blocks = append(blocks, prefSection(c, "Environment conflicts"), prefGroup(c, rows...),
+			flushNote("These variables override what is set here in every terminal that loads them."))
 	}
 
 	for _, tool := range []string{harness.Claude, harness.Codex} {
 		tool := tool
-		add := widget.NewButtonWithIcon("Add", theme.ContentAddIcon(), func() { a.providerForm(tool, provider.Provider{Harness: tool}) })
-		add.Importance = widget.LowImportance
-		head := container.NewBorder(nil, nil, sectionCaption(harness.Title(tool)), add)
-		rows := []fyne.CanvasObject{a.providerRow(tool, provider.Provider{Name: "Official", Harness: tool}, active[tool] == "")}
+		rows := []fyne.CanvasObject{a.providerRow(c, tool, provider.Provider{Name: "Official", Harness: tool}, active[tool] == "")}
 		for _, p := range providers {
 			if p.Harness == tool {
-				rows = append(rows, a.providerRow(tool, p, active[tool] == p.ID))
+				rows = append(rows, a.providerRow(c, tool, p, active[tool] == p.ID))
 			}
 		}
-		items = append(items, head, group(rows...))
+		blocks = append(blocks,
+			prefSectionWith(c, harness.Title(tool), homeLink(c, "Add provider", func() { a.providerForm(tool, provider.Provider{Harness: tool}) })),
+			prefGroup(c, rows...))
 	}
 
 	state := cctoggles.State()
+	hasClaude := harness.Installed(harness.Claude, "")
 	var toggles []fyne.CanvasObject
 	for _, t := range cctoggles.All {
 		id := t.ID
-		toggles = append(toggles, toggleRow(t.Title, t.Desc, state[id], harness.Installed(harness.Claude, ""), func(on bool) {
+		toggles = append(toggles, prefRow(c, t.Title, t.Desc, prefToggle(c, state[id], hasClaude, func(on bool) {
 			a.runOp(func() error { return a.doSetToggle(id, on) })
-		}))
+		})))
 	}
-	items = append(items, sectionCaption("Claude Code settings"), group(toggles...))
-	return scrollTab(items...)
+	blocks = append(blocks, prefSection(c, "Claude Code settings"), prefGroup(c, toggles...))
+	return prefPage(pageHeader(c, "Providers", "Point Claude Code or Codex at another model API. Only the endpoint, key and model settings change; everything else in their config stays as it is."), blocks...)
 }
 
-func (a *app) providerRow(tool string, p provider.Provider, inUse bool) fyne.CanvasObject {
+// providerRow is one provider: its endpoint and model, then Use (or an
+// "In use" tag by the name) and, for the ones you added, Test, Edit and Remove.
+func (a *app) providerRow(c homeColors, tool string, p provider.Provider, inUse bool) fyne.CanvasObject {
 	detail := p.BaseURL
 	if p.ID == "" {
 		detail = "Your own sign-in"
@@ -289,24 +214,22 @@ func (a *app) providerRow(tool string, p provider.Provider, inUse bool) fyne.Can
 	if p.Model != "" {
 		detail += " · " + p.Model
 	}
-	left := titleSub(p.Name, detail)
+	tag := ""
 	var right []fyne.CanvasObject
 	if inUse {
-		right = append(right, badge("In use"))
+		tag = "In use"
 	} else {
 		id := p.ID
-		use := widget.NewButton("Use", func() { a.runOp(func() error { return a.doProviderUse(tool, id) }) })
-		right = append(right, use)
+		right = append(right, homeBtn(c, "Use", true, func() { a.runOp(func() error { return a.doProviderUse(tool, id) }) }))
 	}
 	if p.ID != "" {
-		p := p
 		right = append(right,
-			iconButton(theme.MediaPlayIcon(), func() { a.probeProvider(p) }),
-			iconButton(theme.DocumentCreateIcon(), func() { a.providerForm(tool, p) }),
-			iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doProviderDelete(p.ID) }) }),
+			homeLink(c, "Test", func() { a.probeProvider(p) }),
+			homeLink(c, "Edit", func() { a.providerForm(tool, p) }),
+			homeRedLink(c, "Remove", func() { a.runOp(func() error { return a.doProviderDelete(p.ID) }) }),
 		)
 	}
-	return actionRow(left, right...)
+	return prefItem(c, clip(p.Name, 32), tag, clip(detail, 56), right...)
 }
 
 func parseEnvLines(text string) (map[string]string, error) {
@@ -446,70 +369,6 @@ func (a *app) providerForm(tool string, p provider.Provider) {
 
 // ---------- MCP ----------
 
-func (a *app) mcpTabContent() fyne.CanvasObject {
-	a.mu.Lock()
-	servers := append([]mcp.Server(nil), a.cfg.MCPServers...)
-	a.mu.Unlock()
-	desktopDir := a.desktopDir()
-	var tools []string
-	for _, t := range mcp.Tools {
-		if harness.Installed(t, desktopDir) {
-			tools = append(tools, t)
-		}
-	}
-
-	add := widget.NewButtonWithIcon("Add", theme.ContentAddIcon(), func() { a.mcpForm(mcp.Server{}, "") })
-	add.Importance = widget.HighImportance
-	paste := widget.NewButton("Paste JSON…", a.mcpPasteForm)
-	var templateNames []string
-	for _, t := range mcp.Templates {
-		templateNames = append(templateNames, t.Name)
-	}
-	templates := widget.NewSelect(templateNames, func(choice string) {
-		for _, t := range mcp.Templates {
-			if t.Name == choice {
-				a.mcpForm(t, "")
-			}
-		}
-	})
-	templates.PlaceHolder = "Templates"
-	reimport := iconButton(theme.ViewRefreshIcon(), func() { a.runOp(a.doMCPImport) })
-
-	items := []fyne.CanvasObject{tabHeader("MCP servers", "One list, written into each tool's own config. Changes reach Claude Code and Cursor at their next start, Claude Desktop after a restart.", reimport, templates, paste, add)}
-	if len(servers) == 0 {
-		items = append(items, newPanel(lowLabel("No MCP servers yet.")))
-	}
-	for _, s := range servers {
-		items = append(items, a.mcpCard(s, tools))
-	}
-	return scrollTab(items...)
-}
-
-func (a *app) mcpCard(s mcp.Server, tools []string) fyne.CanvasObject {
-	what := strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
-	if s.Remote() {
-		what = s.URL
-	}
-	checks := container.NewGridWithColumns(3)
-	for _, t := range tools {
-		t := t
-		c := widget.NewCheck(harness.Title(t), nil)
-		c.SetChecked(s.Enabled[t] && mcp.Supports(t, s))
-		name := s.Name
-		c.OnChanged = func(on bool) { a.runOp(func() error { return a.doMCPToggle(name, t, on) }) }
-		if !mcp.Supports(t, s) {
-			c.Disable()
-		}
-		checks.Add(c)
-	}
-	srv := s
-	head := actionRow(titleSub(s.Name, what),
-		iconButton(theme.DocumentCreateIcon(), func() { a.mcpForm(srv, srv.Name) }),
-		iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doMCPDelete(srv.Name) }) }),
-	)
-	return newPanel(vbox(4, head, checks))
-}
-
 func headerLines(m map[string]string) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -635,6 +494,7 @@ func (a *app) mcpPasteForm() {
 // ---------- skills ----------
 
 func (a *app) skillsTabContent() fyne.CanvasObject {
+	c := homePalette()
 	a.mu.Lock()
 	sources := map[string]profile.SkillSource{}
 	for k, v := range a.cfg.SkillSources {
@@ -642,24 +502,23 @@ func (a *app) skillsTabContent() fyne.CanvasObject {
 	}
 	a.mu.Unlock()
 
-	fromGitHub := widget.NewButtonWithIcon("From GitHub…", theme.DownloadIcon(), func() {
-		src := widget.NewEntry()
-		src.SetPlaceHolder("anthropics/skills/skills/pdf")
-		a.showForm("Install skills from GitHub", "Install", []*widget.FormItem{
-			widget.NewFormItem("Repository path", src),
-		}, fyne.NewSize(520, 0), func() {
-			s := src.Text
-			a.runOp(func() error { return a.doSkillInstall(s) })
-		})
-	})
-	fromGitHub.Importance = widget.HighImportance
-	fromZip := widget.NewButton("From zip…", func() { a.runOp(a.doSkillInstallZip) })
-	fromFolder := widget.NewButton("From folder…", func() { a.runOp(a.doSkillInstallFolder) })
+	header := prefHeader(c, "Skills", "Installed once in ~/.agents/skills, which Codex, Gemini CLI, Cursor, OpenCode and Qwen Code read, and linked into ~/.claude/skills for Claude Code.",
+		homeBtn(c, "From folder…", false, func() { a.runOp(a.doSkillInstallFolder) }),
+		homeBtn(c, "From zip…", false, func() { a.runOp(a.doSkillInstallZip) }),
+		homeBtn(c, "From GitHub…", true, func() {
+			src := widget.NewEntry()
+			src.SetPlaceHolder("anthropics/skills/skills/pdf")
+			a.showForm("Install skills from GitHub", "Install", []*widget.FormItem{
+				widget.NewFormItem("Repository path", src),
+			}, fyne.NewSize(520, 0), func() {
+				s := src.Text
+				a.runOp(func() error { return a.doSkillInstall(s) })
+			})
+		}))
 
-	items := []fyne.CanvasObject{tabHeader("Skills", "Installed once in ~/.agents/skills, which Codex, Gemini CLI, Cursor, OpenCode and Qwen Code read, and linked into ~/.claude/skills for Claude Code.", fromFolder, fromZip, fromGitHub)}
 	list := skills.List()
 	if len(list) == 0 {
-		items = append(items, newPanel(lowLabel("No skills installed.")))
+		return prefPage(header, prefEmpty(c, "No skills installed yet. Add one from a folder, a zip file or a GitHub repository."))
 	}
 	var rows []fyne.CanvasObject
 	for _, s := range list {
@@ -676,23 +535,21 @@ func (a *app) skillsTabContent() fyne.CanvasObject {
 		}
 		var right []fyne.CanvasObject
 		if !(s.Shared && s.Linked) {
-			right = append(right, widget.NewButton("Share with every tool", func() { a.runOp(func() error { return a.doSkillShare(s.Name) }) }))
+			right = append(right, homeBtn(c, "Share with every tool", false, func() { a.runOp(func() error { return a.doSkillShare(s.Name) }) }))
 		}
 		if sources[s.Name].Source != "" {
-			right = append(right, iconButton(theme.ViewRefreshIcon(), func() { a.runOp(func() error { return a.doSkillUpdate(s.Name) }) }))
+			right = append(right, homeLink(c, "Update", func() { a.runOp(func() error { return a.doSkillUpdate(s.Name) }) }))
 		}
-		right = append(right, iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doSkillRemove(s.Name) }) }))
-		rows = append(rows, actionRow(titleSub(s.Name, where), right...))
+		right = append(right, homeRedLink(c, "Remove", func() { a.runOp(func() error { return a.doSkillRemove(s.Name) }) }))
+		rows = append(rows, prefItem(c, clip(s.Name, 40), "", clip(where, 56), right...))
 	}
-	if len(rows) > 0 {
-		items = append(items, group(rows...))
-	}
-	return scrollTab(items...)
+	return prefPage(header, prefSection(c, fmt.Sprintf("Installed · %d", len(list))), prefGroup(c, rows...))
 }
 
 // ---------- instructions ----------
 
 func (a *app) instructionsTabContent() fyne.CanvasObject {
+	c := homePalette()
 	a.mu.Lock()
 	entries := append([]instructions.Entry(nil), a.cfg.Instructions...)
 	activeID := a.cfg.ActiveInstructions
@@ -702,16 +559,37 @@ func (a *app) instructionsTabContent() fyne.CanvasObject {
 	}
 	a.mu.Unlock()
 
-	newBtn := widget.NewButtonWithIcon("New", theme.ContentAddIcon(), func() { a.instructionsForm(instructions.Entry{}) })
-	newBtn.Importance = widget.HighImportance
-	items := []fyne.CanvasObject{tabHeader("Instructions", "One set of global instructions written to each tool's own file. Project files are left alone.", newBtn)}
+	header := prefHeader(c, "Instructions", "One set of global instructions written to each tool's own file. Project files are left alone.",
+		homeBtn(c, "New instructions", true, func() { a.instructionsForm(instructions.Entry{}) }))
 
+	var rows []fyne.CanvasObject
 	var activeBody string
 	for _, e := range entries {
+		e := e
+		preview := strings.TrimSpace(e.Body)
+		if i := strings.IndexByte(preview, '\n'); i >= 0 {
+			preview = preview[:i]
+		}
+		tag := ""
+		var right []fyne.CanvasObject
 		if e.ID == activeID {
 			activeBody = e.Body
+			tag = "In use"
+		} else {
+			right = append(right, homeBtn(c, "Use", true, func() { a.runOp(func() error { return a.doInstrApply(e.ID) }) }))
 		}
+		right = append(right,
+			homeLink(c, "Edit", func() { a.instructionsForm(e) }),
+			homeRedLink(c, "Remove", func() { a.runOp(func() error { return a.doInstrDelete(e.ID) }) }),
+		)
+		rows = append(rows, prefItem(c, clip(e.Name, 40), tag, clip(preview, 64), right...))
 	}
+	saved := prefEmpty(c, "No instructions saved yet. New instructions starts a set.")
+	if len(rows) > 0 {
+		saved = prefGroup(c, rows...)
+	}
+	blocks := []fyne.CanvasObject{prefSection(c, "Saved"), saved}
+
 	sync := instructions.InSync(activeBody)
 	var toolRows []fyne.CanvasObject
 	for _, t := range instructions.Targets() {
@@ -720,41 +598,15 @@ func (a *app) instructionsTabContent() fyne.CanvasObject {
 		if activeID != "" && tools[t.Tool] && !sync[t.Tool] {
 			desc += " · changed outside CD-Switcher"
 		}
-		toolRows = append(toolRows, toggleRow(harness.Title(t.Tool), desc, tools[t.Tool], true, func(on bool) {
+		// prefItem, not prefRow: a path has no spaces to wrap at.
+		toolRows = append(toolRows, prefItem(c, harness.Title(t.Tool), "", clip(desc, 76), prefToggle(c, tools[t.Tool], true, func(on bool) {
 			a.runOp(func() error { return a.doInstrSetTool(t.Tool, on) })
-		}))
+		})))
 	}
 	if len(toolRows) > 0 {
-		items = append(items, sectionCaption("Write to"), group(toolRows...))
+		blocks = append(blocks, prefSection(c, "Write to"), prefGroup(c, toolRows...))
 	}
-
-	var rows []fyne.CanvasObject
-	for _, e := range entries {
-		e := e
-		preview := strings.TrimSpace(e.Body)
-		if i := strings.IndexByte(preview, '\n'); i >= 0 {
-			preview = preview[:i]
-		}
-		if len(preview) > 80 {
-			preview = preview[:80] + "…"
-		}
-		var right []fyne.CanvasObject
-		if e.ID == activeID {
-			right = append(right, badge("In use"))
-		} else {
-			right = append(right, widget.NewButton("Use", func() { a.runOp(func() error { return a.doInstrApply(e.ID) }) }))
-		}
-		right = append(right,
-			iconButton(theme.DocumentCreateIcon(), func() { a.instructionsForm(e) }),
-			iconButton(theme.DeleteIcon(), func() { a.runOp(func() error { return a.doInstrDelete(e.ID) }) }),
-		)
-		rows = append(rows, actionRow(titleSub(e.Name, preview), right...))
-	}
-	if len(rows) == 0 {
-		rows = append(rows, lowLabel("No instructions saved yet."))
-	}
-	items = append(items, sectionCaption("Saved"), group(rows...))
-	return scrollTab(items...)
+	return prefPage(header, blocks...)
 }
 
 func (a *app) instructionsForm(e instructions.Entry) {
@@ -777,73 +629,7 @@ func (a *app) instructionsForm(e instructions.Entry) {
 	})
 }
 
-// ---------- General tab additions ----------
-
-func (a *app) terminalRow(current string) fyne.CanvasObject {
-	apps := terminal.Apps()
-	if current == "" {
-		current = apps[0]
-	}
-	var suppress bool
-	sel := widget.NewSelect(apps, func(v string) {
-		if !suppress {
-			a.runOp(func() error { return a.doSetTerminal(v) })
-		}
-	})
-	suppress = true
-	sel.SetSelected(current)
-	suppress = false
-	label := widget.NewLabelWithStyle("Terminal", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	return vbox(6, container.NewBorder(nil, nil, label, sel), lowLabel("Used by Open Claude Code and Open Codex in the menu."))
-}
-
-func (a *app) exportRow() fyne.CanvasObject {
-	exp := widget.NewButtonWithIcon("Export…", theme.UploadIcon(), func() { a.runOp(a.doExport) })
-	imp := widget.NewButtonWithIcon("Import…", theme.DownloadIcon(), func() { a.runOp(a.doImport) })
-	label := widget.NewLabelWithStyle("Setup file", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	return vbox(6, container.NewBorder(nil, nil, label, container.NewHBox(exp, imp)),
-		lowLabel("Providers, MCP servers, skills and instructions, to move to another Mac. Accounts and API keys stay here."))
-}
-
 // ---------- Manage Profiles additions ----------
-
-func (a *app) strategyRow(current string, enabled bool) fyne.CanvasObject {
-	const (
-		most = "Most room left"
-		soon = "Weekly limit that resets soonest"
-	)
-	var suppress bool
-	sel := widget.NewSelect([]string{most, soon}, func(v string) {
-		if suppress {
-			return
-		}
-		s := profile.StrategyMostRoom
-		if v == soon {
-			s = profile.StrategyConsumeFirst
-		}
-		a.runOp(func() error { return a.doSetStrategy(s) })
-	})
-	suppress = true
-	sel.SetSelected(most)
-	if current == profile.StrategyConsumeFirst {
-		sel.SetSelected(soon)
-	}
-	suppress = false
-	if !enabled {
-		sel.Disable()
-	}
-	return vbox(6, container.NewBorder(nil, nil, widget.NewLabel("Switch to the account with"), sel),
-		lowLabel("Soonest reset spends weekly allowance that would otherwise expire unused. Accounts set to “Skip in auto-switch” are never chosen."))
-}
-
-func (a *app) statuslineRow(on bool) fyne.CanvasObject {
-	return toggleRow(
-		"Read limits from Claude Code",
-		"Claude Code reports each account's session and weekly limits to its statusline after every reply. CD-Switcher records them, so meters stay current without polling Anthropic. Your existing statusline keeps running.",
-		on, harness.Installed(harness.Claude, ""),
-		func(checked bool) { a.runOp(func() error { return a.doSetStatusline(checked) }) },
-	)
-}
 
 func (a *app) doSetStrategy(s string) error {
 	a.cfg.AutoSwitchStrategy = s
@@ -898,17 +684,17 @@ func (a *app) codexMenuItems() []*fyne.MenuItem {
 			items = append(items, dimItem(head))
 		}
 		if e.quota.Session.Seconds > 0 {
-			items = append(items, gaugeItem(fmt.Sprintf("Session %.0f%% · resets %s", e.quota.Session.Percent, e.quota.Session.ResetsAt.Local().Format("3:04pm")), e.quota.Session.Percent, a.openSettings))
+			items = append(items, gaugeItem(fmt.Sprintf("Session %.0f%% · resets %s", e.quota.Session.Percent, e.quota.Session.ResetsAt.Local().Format("3:04pm")), e.quota.Session.Percent, a.onTrayTap))
 		}
 		if e.quota.Weekly.Seconds > 0 {
-			items = append(items, gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s", e.quota.Weekly.Percent, e.quota.Weekly.ResetsAt.Local().Format("Mon Jan 2")), e.quota.Weekly.Percent, a.openSettings))
+			items = append(items, gaugeItem(fmt.Sprintf("Weekly %.0f%% · resets %s", e.quota.Weekly.Percent, e.quota.Weekly.ResetsAt.Local().Format("Mon Jan 2")), e.quota.Weekly.Percent, a.onTrayTap))
 		}
 	}
 	if !cp.fetchedAt.IsZero() && !cp.quota.Unlimited {
 		if len(items) > 0 {
 			items = append(items, fyne.NewMenuItemSeparator())
 		}
-		items = append(items, gaugeItem(fmt.Sprintf("Copilot premium %.0f%% · %d left", cp.quota.Percent, cp.quota.Remaining), cp.quota.Percent, a.openSettings))
+		items = append(items, gaugeItem(fmt.Sprintf("Copilot premium %.0f%% · %d left", cp.quota.Percent, cp.quota.Remaining), cp.quota.Percent, a.onTrayTap))
 	}
 	return items
 }

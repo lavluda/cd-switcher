@@ -24,12 +24,15 @@ on:
         required: true
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +50,8 @@ jobs:
             ext: ".exe"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
 
       - uses: actions/setup-go@v5
         with:
@@ -95,7 +100,6 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CGO_ENABLED: "1"
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -122,7 +126,7 @@ jobs:
           cp cd-switcher "$APP/Contents/MacOS/cd-switcher"
           chmod +x "$APP/Contents/MacOS/cd-switcher"
           cp icon.icns "$APP/Contents/Resources/icon.icns"
-          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -132,8 +136,8 @@ jobs:
             <key>CFBundleExecutable</key><string>cd-switcher</string>
             <key>CFBundleIconFile</key><string>icon</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${{ github.event.inputs.tag || github.ref_name }}</string>
-            <key>CFBundleVersion</key><string>${{ github.event.inputs.tag || github.ref_name }}</string>
+            <key>CFBundleShortVersionString</key><string>$TAG</string>
+            <key>CFBundleVersion</key><string>$TAG</string>
             <key>LSMinimumSystemVersion</key><string>11.0</string>
             <key>LSUIElement</key><true/>
             <key>CFBundleURLTypes</key><array><dict>
@@ -184,21 +188,86 @@ jobs:
             --wait
           xcrun stapler staple "$dmg"
 
+      - name: Embed Windows version metadata
+        if: runner.os == 'Windows'
+        run: |
+          if ($env:TAG -cnotmatch '^v([0-9]+\.[0-9]+\.[0-9]+)(?:[-+][0-9A-Za-z.+-]+)?$') {
+            throw 'Expected a Windows release tag such as v1.2.3.'
+          }
+          $versionParts = [uint16[]]($Matches[1] -split '\.')
+          $fileVersion = ($versionParts -join ',') + ',0'
+          @"
+          1 VERSIONINFO
+          FILEVERSION $fileVersion
+          PRODUCTVERSION $fileVersion
+          FILEOS 0x40004
+          FILETYPE 0x1
+          BEGIN
+            BLOCK "StringFileInfo"
+            BEGIN
+              BLOCK "040904b0"
+              BEGIN
+                VALUE "FileDescription", "CD-Switcher"
+                VALUE "FileVersion", "$env:TAG"
+                VALUE "InternalName", "cd-switcher"
+                VALUE "OriginalFilename", "cd-switcher-windows-amd64.exe"
+                VALUE "ProductName", "CD-Switcher"
+                VALUE "ProductVersion", "$env:TAG"
+              END
+            END
+            BLOCK "VarFileInfo"
+            BEGIN
+              VALUE "Translation", 0x0409, 1200
+            END
+          END
+          "@ | Set-Content -Encoding ascii version.rc
+          windres --input version.rc --output version_windows_amd64.syso --output-format coff
+
       - name: Build
         if: runner.os != 'macOS'
+        shell: bash
         env:
           CGO_ENABLED: "1"
           GOARCH: ${{ matrix.goarch }}
-        # The version goes in via a GitHub Actions expression, not a shell
-        # variable: this step runs under bash on Linux but pwsh on Windows,
-        # and "$TAG" only expands in one of those.
-        run: go build -trimpath -ldflags "-s -w -X main.version=${{ github.event.inputs.tag || github.ref_name }}" -o "cd-switcher-${{ matrix.name }}${{ matrix.ext }}" .
+        run: go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o "cd-switcher-${{ matrix.name }}${{ matrix.ext }}" .
+
+      - name: Upload unsigned Windows build for signing
+        if: runner.os == 'Windows'
+        id: unsigned-windows
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-windows
+          path: cd-switcher-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Sign Windows build
+        if: runner.os == 'Windows'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-windows.outputs.artifact-id }}
+          wait-for-completion: 'true'
+          wait-for-completion-timeout-in-seconds: '7200'
+          output-artifact-directory: signed
+          parameters: |
+            version: ${{ toJSON(env.TAG) }}
+
+      - name: Verify Windows signature
+        if: runner.os == 'Windows'
+        run: |
+          $signature = Get-AuthenticodeSignature -LiteralPath signed/cd-switcher-windows-amd64.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignatureType -ne 'Authenticode' -or !$signature.TimeStamperCertificate) {
+            throw "Expected a valid, timestamped Authenticode signature. Status: $($signature.StatusMessage)"
+          }
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: cd-switcher-${{ matrix.name }}${{ matrix.ext }}
+          tag_name: ${{ env.TAG }}
+          files: ${{ runner.os == 'Windows' && 'signed/' || '' }}cd-switcher-${{ matrix.name }}${{ matrix.ext }}
           fail_on_unmatched_files: true
 
       # Same tap k8s-pods-viewer publishes to. TAP_GITHUB_TOKEN needs contents
@@ -207,7 +276,6 @@ jobs:
         if: runner.os == 'macOS'
         env:
           GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN}" ]; then

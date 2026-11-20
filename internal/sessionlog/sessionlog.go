@@ -24,8 +24,10 @@ import (
 )
 
 const (
-	Claude = "claude"
-	Codex  = "codex"
+	Claude   = "claude"
+	Codex    = "codex"
+	Cursor   = "cursor"
+	OpenCode = "opencode"
 )
 
 // Window is how far back logs are read.
@@ -388,7 +390,11 @@ func (s *Scanner) Report(from time.Time, tool string, hourly bool) Report {
 				rep.Buckets[i].Tools[k.tool] = b
 			}
 			addRow(models, k.model, k.tool, *u)
-			addRow(projects, k.project, k.tool, *u)
+			// Cursor's history has no working directory, so it stays out of
+			// the project table.
+			if k.project != "" {
+				addRow(projects, k.project, k.tool, *u)
+			}
 			if u.Unpriced > 0 {
 				unpriced[k.model] = true
 			}
@@ -429,6 +435,33 @@ func addRow(m map[string]*Row, name, tool string, u Usage) {
 		r.Tool = ""
 	}
 	r.add(u)
+}
+
+// External is usage that did not come from a local session log.
+type External struct {
+	At      time.Time
+	Model   string
+	Project string
+	Usage
+}
+
+// Replace swaps in one tool's usage from outside the log files. A later call
+// for the same tool drops what the previous call added.
+func (s *Scanner) Replace(tool string, rows []External) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := &fileState{buckets: map[key]*Usage{}, hasRecords: true}
+	for _, r := range rows {
+		if r.At.IsZero() {
+			continue
+		}
+		model := r.Model
+		if model == "" {
+			model = tool
+		}
+		addTo(st.buckets, key{r.At.Unix() / 3600, tool, model, r.Project}, r.Usage)
+	}
+	s.files["external:"+tool] = st
 }
 
 // sortedRows orders by cost, then by tokens for rows without a price.
