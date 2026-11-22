@@ -392,7 +392,7 @@ func (a *app) mcpTabContent() fyne.CanvasObject {
 		rows = append(rows, homeRule(c), container.New(layout.NewCustomPaddedLayout(12, 12, 0, 0), container.New(cols, a.mcpRow(c, s, tools)...)))
 	}
 	table := homeCard(c, 4, 22, vbox(0, rows...))
-	note := flushNote("Changes reach Claude Code and Cursor at their next start, and Claude Desktop after a restart. Only tools installed on this Mac get a column.")
+	note := flushNote("Changes reach Claude Code and Cursor at their next start, and Claude Desktop after a restart. Only tools installed on this computer get a column.")
 	return pageScroll(header, table, note)
 }
 

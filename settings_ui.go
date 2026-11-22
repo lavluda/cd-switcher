@@ -96,7 +96,7 @@ func (a *app) generalTabContent() fyne.CanvasObject {
 			prefToggle(c, inboxInstalled(), hasTool, func(on bool) { a.runOp(func() error { return a.doSetInbox(on) }) })),
 		prefRow(c, "Terminal", "Used by Open Claude Code and Open Codex in the menu.",
 			homeSelect(c, term, apps, true, func(v string) { a.runOp(func() error { return a.doSetTerminal(v) }) })),
-		prefRow(c, "Setup file", "Providers, MCP servers, skills and instructions, to move to another Mac. Accounts and API keys stay here.",
+		prefRow(c, "Setup file", "Providers, MCP servers, skills and instructions, to move to another computer. Accounts and API keys stay here.",
 			container.New(layout.NewCustomPaddedHBoxLayout(8),
 				homeBtn(c, "Export…", false, func() { a.runOp(a.doExport) }),
 				homeBtn(c, "Import…", false, func() { a.runOp(a.doImport) }))),

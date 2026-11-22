@@ -14,7 +14,7 @@ ifeq ($(shell uname -s),Darwin)
 GOFLAGS_LD := -ldflags=-extldflags=-Wl,-no_warn_duplicate_libraries
 endif
 
-.PHONY: build run mac-app test fmt vet clean windows
+.PHONY: build run mac-app install uninstall test fmt vet clean windows
 
 build:
 	go build $(GOFLAGS_LD) -o bin/$(BIN) .
@@ -30,6 +30,14 @@ endif
 # Native notifications use the bundle icon; a bare binary uses AppleScript's.
 mac-app: build
 	sh scripts/package-dev-macos.sh
+
+# Linux: installs for the current user (~/.local/bin, app-menu entry, icon).
+install: build
+	go run ./cmd/genicon bin/icon.png
+	sh scripts/install-linux.sh bin/$(BIN) bin/icon.png
+
+uninstall:
+	sh scripts/install-linux.sh --uninstall
 
 test:
 	go test ./internal/...

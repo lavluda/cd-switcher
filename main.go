@@ -81,6 +81,9 @@ type app struct {
 	// cannot report visibility; on macOS visibility is read from the window.
 	panelWin  fyne.Window
 	panelOpen bool
+	// noTray is set when no tray host can show the icon (Linux without a
+	// StatusNotifierWatcher). The panel then opens at start and closing it quits.
+	noTray bool
 	// trayTapAt is the last tray tap, used to drop the duplicate tap one click can send.
 	trayTapAt time.Time
 	// usage is the Usage page's log scanner and filter choices.
@@ -178,7 +181,8 @@ func main() {
 			return
 		}
 	}
-	a.fyneApp = fyneapp.New()
+	// A unique ID gives Fyne a Preferences store; New() logs an error without one.
+	a.fyneApp = fyneapp.NewWithID("com.lavluda.cd-switcher")
 	initInboxNotifications()
 	// Restyles Fyne surfaces. Zenity dialogs stay native OS chrome.
 	a.fyneApp.Settings().SetTheme(uitheme.New())
@@ -189,7 +193,12 @@ func main() {
 	}
 	a.desk = desk
 
+	a.noTray = !trayHostAvailable()
 	a.setup()
+	if a.noTray {
+		log.Printf("no system tray host (org.kde.StatusNotifierWatcher); opening the panel as a window")
+		a.fyneApp.Lifecycle().SetOnStarted(a.onTrayTap)
+	}
 	// Menu-bar-only app: no Dock icon. Must run right before Run(): Fyne's
 	// GLFW/Cocoa init sets the activation policy to Regular itself — "in
 	// case we are unbundled, make us a proper UI application" — so hiding it

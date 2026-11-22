@@ -40,7 +40,11 @@ func (a *app) ensurePanel() {
 	w.Resize(fyne.NewSize(panelW, panelH))
 	w.SetFixedSize(true)
 	w.SetContent(a.panelContent())
-	w.SetCloseIntercept(w.Hide)
+	w.SetCloseIntercept(a.hidePanel) // not w.Hide: off macOS panelOpen is the only record that it closed
+	if a.noTray {
+		// No icon to reopen it from: closing the only window ends the app.
+		w.SetCloseIntercept(a.fyneApp.Quit)
+	}
 	w.Hide()
 	a.panelWin = w
 	a.desk.SetSystemTrayWindow(w)
@@ -61,7 +65,7 @@ func (a *app) onTrayTap() {
 		}
 		a.trayTapAt = time.Now()
 		if a.panelShowing() {
-			a.panelWin.Hide()
+			a.hidePanel() // resets panelOpen; a bare Hide left it true, so later taps never reopened (Linux)
 			return
 		}
 		if a.usage.scanner == nil {

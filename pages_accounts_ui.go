@@ -310,7 +310,7 @@ func (a *app) codexTabContent() fyne.CanvasObject {
 
 	switch {
 	case !harness.Installed(harness.Codex, ""):
-		items = append(items, homeCard(c, 18, 22, homeText("Codex is not installed on this Mac (no "+harness.CodexHome()+" folder).", 12, false, c.label2)))
+		items = append(items, homeCard(c, 18, 22, homeText("Codex is not installed on this computer (no "+harness.CodexHome()+" folder).", 12, false, c.label2)))
 	case len(accts) == 0:
 		items = append(items, homeCard(c, 18, 22, homeText("No Codex accounts yet. Save current login keeps the account Codex uses now; Sign in adds another one through your browser.", 12, false, c.label2)))
 	}

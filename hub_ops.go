@@ -124,7 +124,7 @@ func (a *app) doCodexAddCurrent() error {
 	defer cleanup()
 	ident, err := codex.ReadIdentity(live)
 	if err != nil {
-		return fmt.Errorf("Codex is not signed in on this Mac (%v). Run codex login first, or use Sign in to another account", err)
+		return fmt.Errorf("Codex is not signed in on this computer (%v). Run codex login first, or use Sign in to another account", err)
 	}
 	id, err := a.codexImport(live, ident)
 	if err != nil {

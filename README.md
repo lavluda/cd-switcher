@@ -15,6 +15,35 @@ brew install --cask lavluda/tap/cd-switcher
 
 Homebrew asks you to trust `lavluda/tap` the first time you install from it. That installs `CD-Switcher.app`. Launch it from Spotlight, or run `open -a CD-Switcher`.
 
+On Linux, download `cd-switcher-linux-amd64.tar.gz` from the
+[latest release](https://github.com/lavluda/cd-switcher/releases/latest), unpack it and run its
+installer. It installs for your user only, so it needs no root:
+
+```sh
+tar xzf cd-switcher-linux-amd64.tar.gz
+sh cd-switcher-*-linux-amd64/install.sh        # add --uninstall to remove it again
+```
+
+That puts `cd-switcher` in `~/.local/bin` and adds it to your app menu. On
+Debian or Ubuntu, the runtime extras are:
+
+```sh
+sudo apt-get install libsecret-tools xdg-utils   # secret-tool for usage stats, xdg-open for cdswitcher:// links
+```
+
+The tray icon is a StatusNotifierItem (the AppIndicator protocol), so it needs
+a panel that hosts one. KDE Plasma does out of the box and GNOME does with the
+AppIndicator extension. Window managers whose bar only has an XEmbed tray,
+such as i3 with i3bar or polybar, need a bridge: run
+[snixembed](https://git.sr.ht/~steef/snixembed) before CD-Switcher (for i3,
+`exec --no-startup-id snixembed` in your config). With no tray host at all,
+CD-Switcher opens its panel as an ordinary window at start; closing that
+window quits the app.
+
+Install Claude Desktop itself from [Anthropic's apt repository](https://code.claude.com/docs/en/desktop-linux)
+(beta, Debian 12+ and Ubuntu 22.04+). CD-Switcher starts `claude-desktop` from
+your `PATH`, or `claude` if that is missing.
+
 To build from source instead, see [Build](#build).
 
 ## How it works
@@ -61,7 +90,7 @@ picking an account quits, swaps, and relaunches.
 on the General tab. Claude has to accept a second process; if a window does not stay
 open, switch back to one account.
 
-Control-Option-S opens the next account. The tray menu can also switch to,
+Control-Option-S opens the next account (macOS only). The tray menu can also switch to,
 or open, the account with the most session room left.
 
 ## Tabs
@@ -70,7 +99,7 @@ Clicking the tray icon opens a panel. Its General, Switching and Accounts
 tabs cover Claude Desktop; the tabs for the other tools are described under
 [Other AI tools](#other-ai-tools).
 
-**General** — switching mode, limit alerts, open at login (macOS), automatic
+**General** — switching mode, limit alerts, open at login, automatic
 update checks, the agent inbox, the terminal app, and export/import. Limit alerts notify you once when a session or
 weekly limit reaches 80% (or 70% or 90%); the notice stays quiet until that
 window resets, or until usage falls back under the line. Choose Off to
@@ -185,10 +214,12 @@ starts.
 make run        # builds and launches; on macOS, uses an app bundle for the notification logo
 ```
 
-A tray icon appears.
+A tray icon appears. On Linux without a tray host the panel opens as a
+window instead (see [Install](#install)).
 
 - **First run** offers to capture the account you're currently signed into,
-  and (on macOS) asks once whether to open CD-Switcher at login. The General tab
+  and (on macOS and Linux) asks once whether to open CD-Switcher at login
+  (on Linux, through an entry in `~/.config/autostart`). The General tab
   can change that answer later.
 - **Add account…** quits Claude, saves the current account, and opens a fresh
   login. Sign into the other account, then choose **Save this account**.
@@ -232,10 +263,20 @@ build` reports its version as `dev` and never claims to be out of date.
 make build      # native (macOS/Linux/Windows — run on the target OS)
 make mac-app    # macOS dev bundle with the app icon and native notifications
 make windows    # prints the fyne-cross command; Fyne cannot cross-compile without cgo
+make install    # Linux: build, then install for your user (make uninstall removes it)
 make test       # unit tests (snapshot/restore, usage parsing, icons, update checks)
 ```
 
 The UI uses Fyne (OpenGL + cgo), so every binary is built on its target OS.
+On Debian or Ubuntu, a Linux build needs these packages:
+
+```sh
+sudo apt-get install gcc pkg-config libgl1-mesa-dev xorg-dev libxkbcommon-dev libayatana-appindicator3-dev
+```
+
+A link error such as `cannot find -lXxf86vm` means one of these is missing
+(`xorg-dev` pulls in that library). Builds are tested on Debian 13 with i3.
+
 A Windows build needs [fyne-cross](https://github.com/fyne-io/fyne-cross) or a
 Windows host with a C toolchain. `make windows` only prints that command.
 

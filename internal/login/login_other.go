@@ -1,11 +1,11 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package login
 
 import "errors"
 
 // ErrUnsupported is returned on platforms without a login-item implementation.
-var ErrUnsupported = errors.New("login: open at login is only supported on macOS")
+var ErrUnsupported = errors.New("login: open at login is not supported on this platform")
 
 // Supported reports whether this OS can register a login item.
 func Supported() bool { return false }

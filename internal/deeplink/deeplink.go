@@ -118,7 +118,7 @@ func Parse(raw string) (Request, error) {
 			if s.Remote() {
 				r.Risks = append(r.Risks, endpointRisks(s.URL)...)
 			} else {
-				r.Risks = append(r.Risks, fmt.Sprintf("“%s” runs a program on this Mac: %s %s", s.Name, s.Command, strings.Join(s.Args, " ")))
+				r.Risks = append(r.Risks, fmt.Sprintf("“%s” runs a program on this computer: %s %s", s.Name, s.Command, strings.Join(s.Args, " ")))
 			}
 			for k := range s.Env {
 				if loaderVar(k) {

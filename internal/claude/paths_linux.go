@@ -26,18 +26,30 @@ func dataDir() (string, error) {
 }
 
 // isClaudeDesktopProcess reports whether a process belongs to Claude Desktop
-// rather than the bundled "claude" CLI (Claude Code), which shares the same
-// executable name. Without excluding the CLI, a running Claude Code session
-// would make Quit() wait forever and abort every switch. Claude Code lives
-// under a "claude-code" directory, so its executable path identifies it.
+// rather than the "claude" CLI (Claude Code), which shares the process name.
+// Treating the CLI as Desktop is dangerous: Quit() would SIGTERM/SIGKILL every
+// running Claude Code session. The native Claude Code installer runs from
+// ~/.local/share/claude/versions/<version>, a path with no "claude-code" in
+// it, so excluding by "claude-code" alone is not enough. When the executable
+// path is known, require it to be Claude Desktop's own: the claude-desktop
+// binary, or a file inside a claude-desktop or capitalised "Claude" install
+// (an AppImage mounts as /tmp/.mount_Claude*).
 func isClaudeDesktopProcess(name, exe string) bool {
 	if !strings.HasPrefix(strings.ToLower(name), "claude") {
 		return false
 	}
-	if strings.Contains(strings.ToLower(exe), "claude-code") {
+	if exe == "" {
+		// Unreadable exe (another user's process): fall back to the name.
+		return true
+	}
+	lower := strings.ToLower(exe)
+	if strings.Contains(lower, "claude-code") {
 		return false
 	}
-	return true
+	if strings.ToLower(filepath.Base(exe)) == "claude-desktop" {
+		return true
+	}
+	return strings.Contains(lower, "claude-desktop") || strings.Contains(exe, "Claude")
 }
 
 // requestQuit sends SIGTERM for a graceful shutdown.

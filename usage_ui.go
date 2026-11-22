@@ -183,7 +183,7 @@ func (a *app) usageTabContent() fyne.CanvasObject {
 	header := container.NewBorder(nil, nil,
 		vbox(2, homeText("Usage", 20, true, c.label), homeText("Tokens and estimated cost, priced at API list rates", 12, false, c.label2)),
 		container.New(layout.NewCustomPaddedHBoxLayout(8), container.NewCenter(homeText(status, 11.5, false, c.label2)), refresh))
-	note := lowLabel("Claude Code and Codex come from the session logs on this Mac. Cursor comes from the usage its signed-in account reports. OpenCode comes from its local database.")
+	note := lowLabel("Claude Code and Codex come from the session logs on this computer. Cursor comes from the usage its signed-in account reports. OpenCode comes from its local database.")
 
 	ranges := homeSegmented(c, []string{"Today", "7 days", "30 days"}, u.rangeIdx, 12, 11, func(i int) { u.rangeIdx = i; a.redrawSettings() })
 	tools := homeSegmented(c, append([]string{"All tools"}, usageNames...), u.toolIdx, 12, 11, func(i int) { u.toolIdx = i; a.redrawSettings() })

@@ -231,6 +231,28 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o "cd-switcher-${{ matrix.name }}${{ matrix.ext }}" .
 
+      # Linux also ships a tarball: the binary, its icon and an installer that
+      # adds an app-menu entry for the current user (no root needed).
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          dir="cd-switcher-$TAG-linux-amd64"
+          mkdir "$dir"
+          cp cd-switcher-linux-amd64 "$dir/cd-switcher"
+          go run ./cmd/genicon "$dir/icon.png"
+          cp scripts/install-linux.sh "$dir/install.sh"
+          cp LICENSE README.md "$dir/"
+          tar czf cd-switcher-linux-amd64.tar.gz "$dir"
+
+      - name: Attach Linux tarball to release
+        if: runner.os == 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: cd-switcher-linux-amd64.tar.gz
+          fail_on_unmatched_files: true
+
       - name: Upload unsigned Windows build for signing
         if: runner.os == 'Windows'
         id: unsigned-windows
